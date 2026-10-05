@@ -12,7 +12,7 @@ This receiver uses the **Cast Message Architecture**:
 
 ## Deployment
 
-**Deployed at:** https://zekimust-a11y.github.io/lms-cast/
+**Deployed at:** https://lyr-app.github.io/lms-cast/
 
 **Google Cast App ID:** 180705D2
 
@@ -75,7 +75,7 @@ This receiver uses the **Cast Message Architecture**:
 
 1. Set Google Cast Console receiver URL to:
    ```
-   https://zekimust-a11y.github.io/lms-cast/
+   https://lyr-app.github.io/lms-cast/
    ```
 
 2. Server will:
