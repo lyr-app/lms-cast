@@ -2989,6 +2989,8 @@
         R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
         if (R.lsFt > 2) {
           var fps = R.lsFn / R.lsFt, cur = R.lsQ || 1;
+          // For the receiver's report: what it actually manages.
+          LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id;
           if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
           else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
           else R.lsUp = 0;
