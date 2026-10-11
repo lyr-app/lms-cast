@@ -767,6 +767,7 @@
       let displayLevelsKey = '';
       let displaySpectrumKey = '';
       let displayLyricsKey = '';
+      let displayLightshowKey = '';
       let lastStyleArt = { trackId: '', src: '' };
       // The last style the Core asked for, so a PAUSE (which carries no
       // payload) can keep the clock up as a standby screen.
@@ -805,6 +806,7 @@
         if (!displayRenderer) {
           // Chromecast GPUs are weak: 30 fps is plenty for needles and reels.
           displayRenderer = lib.create(displayCanvas, { view, variant: variant || undefined, maxFps: 30 });
+          displayLightshowKey = '';
           displayLevelsKey = '';
           displaySpectrumKey = '';
           fullSpectrumTrackId = '';
@@ -825,6 +827,13 @@
           sampleRate: audio.sample_rate || undefined,
         });
         displayRenderer.setPosition(info.seek, info.playing, info.duration);
+        // Light show sliders from the app's Settings, held by the Core.
+        const lo = payload.lightshow_options || null;
+        const loKey = JSON.stringify(lo);
+        if (loKey !== displayLightshowKey && typeof displayRenderer.setOptions === 'function') {
+          displayLightshowKey = loKey;
+          displayRenderer.setOptions(lo);
+        }
         // Levels ride on the payload once the Core has analysed the track.
         const lv = payload.levels;
         const lvKey = lv && lv.data ? info.trackId + '|' + lv.bucketSeconds + '|' + lv.data.length : info.trackId + '|none';
