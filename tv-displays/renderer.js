@@ -2347,7 +2347,7 @@
     // 2026-10-11: "some of these just shake and alternate left right").
     var bk = sm.energy * 2;
     this.surge += ((playing ? this.env : 0) - this.surge) * Math.min(1, dt * 6);
-    var dT = dt * (this.goS + 0.6 * this.surge * I * I * bk) * F.speed * Math.pow(16, sm.speed - 0.5);
+    var dT = dt * (this.goS + 0.6 * this.surge * I * I * bk) * F.speed * Math.pow(16, sm.speed - 0.5) * (this.weak ? 0.6 : 1);
     // Only a drop moves the camera (a slow push), and Beat strength above
     // three quarters adds a gentle one per beat for those who want it.
     this.punch = Math.min(0.06, this.kick + this.env * 0.02 * I * Math.max(0, bk - 1.5) * 2);
@@ -2890,6 +2890,14 @@
   // falls back to the 2D drawing).
   function lsGlDraw(G, L, w, h) {
     var gl = G.gl, src = G.cur, dst = 1 - src, F = LS_FLAVOURS[L.flavour], sm = L.sm;
+    if (G.weak && !L.weak) {
+      // Even pacing beats a higher, uneven rate on a weak GPU: frames that
+      // arrive anywhere from 30 to 15 a second read as judder ("soft and
+      // jumpy", 3rd-gen Chromecast, 2026-10-11). Capped at 20, motion slowed
+      // so each frame moves less.
+      L.weak = true;
+      if (!L.renderer.lsFpsBase) { L.renderer.lsFpsBase = L.renderer.maxFps; L.renderer.maxFps = Math.min(L.renderer.maxFps, 20); }
+    }
     if (G.weak && !L.weakSet) { L.weakSet = true; LS_HEAVY_SCENES.forEach(function (id) { L.unsupported[id] = true; }); if (L.unsupported[L.cur.id]) L.replaceCurrent(); }
     // Current and next scenes need a working program; one that fails is
     // marked and replaced at once (it was never drawn, so nothing jumps).
@@ -3039,6 +3047,7 @@
     // run slow, back up when there is room.
     drawFull: function (c, R, b) {
       var L = R.ls || (R.ls = new LightShow(R.variant, R.lsOpts));
+      L.renderer = R;
       L.setFlavour(R.variant);
       var XS = L.opts.exp && L.opts.exp.scene;
       if (XS && LS_SCENES.indexOf(XS) >= 0 && L.cur.id !== XS) { L.unsupported = {}; L.weakSet = true; for (var t9 = 0; t9 < 60 && L.cur.id !== XS; t9++) L.cur = lsPickScene(L); L.next = null; L.cur.life = 1e9; }
@@ -3573,6 +3582,7 @@
   };
   P._releaseLightshow = function () {
     lsDomDetach(this);
+    if (this.lsFpsBase) { this.maxFps = this.lsFpsBase; this.lsFpsBase = 0; }
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
     this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0;
   };
