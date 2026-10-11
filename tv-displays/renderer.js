@@ -2636,10 +2636,12 @@
   // clips at 1), the composite doubles it back before the feedback and tone map.
   function lsSceneFrag(i) {
     return LS_COMMON + "\n" + LS_SCENE_SRC[i] + "\n" + [
-      "uniform vec4 uW0, uW1, uK0, uK1; uniform vec3 uC, uD; uniform float uT, uPunch;",
+      "uniform vec4 uW0, uW1, uK0, uK1; uniform vec3 uC, uD; uniform float uT, uPunch, uDirect;",
       "void main(){",
       "  vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0 * (1.0 - uPunch);",
-      "  gl_FragColor = vec4(min(" + LS_SCENE_FN[i] + "(p, uW0, uW1, uK0, uK1, uT, uC, uD) * 0.5, vec3(1.0)), 1.0);",
+      "  vec3 col = " + LS_SCENE_FN[i] + "(p, uW0, uW1, uK0, uK1, uT, uC, uD);",
+      // uDirect: straight to the screen (weak GPUs), tone-mapped here.
+      "  gl_FragColor = vec4(uDirect > 0.5 ? 1.0 - exp(-col * 1.35) : min(col * 0.5, vec3(1.0)), 1.0);",
       "}",
     ].join("\n");
   }
@@ -2765,7 +2767,7 @@
     LS_GL_STATUS.state = "ok";
     // A low-end GPU (old Chromecasts, early Mali/Adreno, VideoCore): fewer
     // pixels and only the lighter scenes, or it crawls.
-    var weak = /Vivante|Mali-[34]|Mali-T[67]|VideoCore|PowerVR SGX|Adreno \(TM\) [23]/i.test(LS_GL_STATUS.renderer || "");
+    var weak = /Vivante|Mali-[34]|Mali-T[67]|VideoCore|PowerVR SGX|Adreno \(TM\) [23]/i.test(LS_GL_STATUS.renderer || "") || root.__LYR_LS_WEAK === true; // the flag: for trying weak mode on a strong machine
     LS_GL_STATUS.weak = weak; LS_GL_STATUS.sceneFails = [];
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -2832,7 +2834,7 @@
   }
   function lsDrawScene(G, L, sc, pr, slot, w, h) {
     var gl = G.gl, u = pr.u, ps = L.params(sc), k = sc.k, hue = sc.post === 1 ? 0 : sc.hue;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, G.sfb[slot]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, slot < 0 ? null : G.sfb[slot]);
     gl.viewport(0, 0, w, h);
     gl.useProgram(pr.p);
     gl.uniform1i(u.uSpec, 1);
@@ -2840,6 +2842,7 @@
     gl.uniform1f(u.uBass, L.bass); gl.uniform1f(u.uMid, L.mid); gl.uniform1f(u.uTreb, L.treb);
     gl.uniform1f(u.uBeat, L.beat); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level);
     gl.uniform1f(u.uPunch, L.punch);
+    gl.uniform1f(u.uDirect, slot < 0 ? 1 : 0);
     gl.uniform1f(u.uT, sc.time % 2000);
     gl.uniform4f(u.uW0, ps[0], ps[1], ps[2], ps[3]);
     gl.uniform4f(u.uW1, ps[4], ps[5], ps[6], ps[7]);
@@ -2848,6 +2851,34 @@
     gl.uniform3f(u.uC, sc.c[0], sc.c[1], sc.c[2]);
     gl.uniform3f(u.uD, sc.d[0] + hue, sc.d[1] + hue, sc.d[2] + hue);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  // Weak GPUs: one pass straight to the screen, a constant-alpha fade between
+  // scenes, no trails buffer and no finish. Each framebuffer pass is costly on
+  // such chips: the full four-pass path ran at 15 fps even at 216 lines on a
+  // Vivante GC1000 (2026-10-11).
+  function lsGlDrawDirect(G, L, w, h) {
+    var gl = G.gl;
+    if (G.cv.width !== w) G.cv.width = w;
+    if (G.cv.height !== h) G.cv.height = h;
+    var n = L.bands.length;
+    if (G.specBuf.length !== n) G.specBuf = new Uint8Array(n);
+    for (var i = 0; i < n; i++) G.specBuf[i] = Math.round(clamp(L.bands[i], 0, 1) * 255);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, G.spec);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, n, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, G.specBuf);
+    gl.activeTexture(gl.TEXTURE0);
+    var m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
+    gl.disable(gl.BLEND);
+    lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], -1, w, h);
+    if (L.next && m > 0.0005) {
+      gl.enable(gl.BLEND);
+      gl.blendColor(0, 0, 0, m);
+      gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+      lsDrawScene(G, L, L.next, G.scenes[L.next.idx], -1, w, h);
+      gl.disable(gl.BLEND);
+    }
+    return true;
   }
   // Returns false when no scene of this flavour works on this GPU (the caller
   // falls back to the 2D drawing).
@@ -2862,6 +2893,7 @@
       break;
     }
     if (!lsSceneProg(G, L.cur.idx)) return false;
+    if (G.weak) return lsGlDrawDirect(G, L, w, h);
     lsGlSize(G, w, h);
     // The bands as a 1-row texture: the scenes read it interpolated.
     var n = L.bands.length;
