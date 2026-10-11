@@ -2034,6 +2034,9 @@
     o = o || {};
     // Flashes are off unless asked for (owner, 2026-10-11).
     var out = { title: o.title !== false, flashes: o.flashes === true, palette: LS_PALETTES[o.palette] && o.palette !== "mono" ? o.palette : "" };
+    // Device experiments (sent by a caster, never by Settings): dom / direct
+    // on-off, lines (render height cap), px (pixel-ratio cap of the canvas).
+    out.exp = o.exp && typeof o.exp === "object" ? o.exp : null;
     if (o.trails == null && o.depth != null) o = Object.assign({}, o, { trails: o.depth }); // first release called it depth
     for (var k in LS_SLIDERS) { var v = +o[k]; out[k] = o[k] != null && o[k] !== "" && isFinite(v) ? clamp(v, 0, 1) : LS_SLIDERS[k]; }
     return out;
@@ -2893,7 +2896,7 @@
       break;
     }
     if (!lsSceneProg(G, L.cur.idx)) return false;
-    if (G.weak) return lsGlDrawDirect(G, L, w, h);
+    if (G.weak && !(L.opts.exp && L.opts.exp.direct === false)) return lsGlDrawDirect(G, L, w, h);
     lsGlSize(G, w, h);
     // The bands as a 1-row texture: the scenes read it interpolated.
     var n = L.bands.length;
@@ -3014,7 +3017,7 @@
       if (!oc || !cv.style || typeof par.appendChild !== "function") return null;
       var st = cv.style; st.position = "absolute"; st.left = "0"; st.top = "0"; st.width = "100%"; st.height = "100%"; st.pointerEvents = "none";
       try { par.appendChild(cv); } catch (e) { return null; }
-      ov = R.lsOv = { cv: cv, c: oc };
+      ov = R.lsOv = { cv: cv, c: oc, on: true };
     }
     if (ov.cv.width !== w) ov.cv.width = w;
     if (ov.cv.height !== h) ov.cv.height = h;
@@ -3043,13 +3046,15 @@
       // at 1080 lines and at 1.5x the CSS height (a Chromecast at 960 x 540
       // CSS draws 810 lines, ~14 MB, not 1080).
       var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
-      var cap = G && G.weak ? 540 : 1080;
+      var X = L.opts.exp || {};
+      var cap = num(X.lines, 0) > 0 ? num(X.lines, 0) : G && G.weak ? 540 : 1080;
       var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
       // On screen, the GL canvas sits over the renderer's own canvas and the
       // browser scales it up (R.lsDom). Copying it into the 2D canvas every
       // frame was the cost on a 3rd-gen Chromecast: 7 fps at 540 lines
       // (2026-10-11). A snapshot (a different canvas) still copies.
-      var onScreen = c.canvas === R.canvas;
+      var onScreen = c.canvas === R.canvas && X.dom !== false;
+      if (!onScreen && R.lsDom) lsDomDetach(R);
       if (G) {
         try {
           if (lsGlDraw(G, L, rw, rh)) {
@@ -3073,7 +3078,7 @@
         if (R.lsFt > 2) {
           var fps = R.lsFn / R.lsFt, cur = R.lsQ || 1;
           // For the receiver's report: what it actually manages.
-          LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id;
+          LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id; LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && G.weak && !(X.direct === false) ? "+direct" : "") + " px" + R.pxCap;
           if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
           else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
           else R.lsUp = 0;
@@ -3089,8 +3094,10 @@
         var ov = lsOverlay(R, show);
         if (!ov) return;
         var oc = ov.c;
+        // Hidden, it costs nothing: no per-frame clear of a full-screen layer.
+        if (!show) { if (ov.on) { oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, ov.cv.width, ov.cv.height); ov.cv.style.display = "none"; ov.on = false; } return; }
+        if (!ov.on) { ov.cv.style.display = "block"; ov.on = true; }
         oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, ov.cv.width, ov.cv.height);
-        if (!show) return;
         var s0 = Math.min(ov.cv.width / W, ov.cv.height / H);
         oc.setTransform(s0, 0, 0, s0, (ov.cv.width - W * s0) / 2, (ov.cv.height - H * s0) / 2);
         c = oc;
@@ -3517,6 +3524,9 @@
   // Light show options (energy, palette, pace, scenes, title, flashes); see lsOptions.
   P.setOptions = function (o) {
     this.lsOpts = o || null;
+    var px = o && o.exp ? num(o.exp.px, 0) : 0;
+    if (px > 0 && px !== this.pxCap) { this.pxBase = this.pxBase || this.pxCap; this.pxCap = px; this.needSize = true; this.lsDomFilled = false; }
+    else if (!(px > 0) && this.pxBase) { this.pxCap = this.pxBase; this.pxBase = 0; this.needSize = true; this.lsDomFilled = false; }
     if (this.ls) this.ls.setOptions(this.lsOpts);
     this._wake();
   };
