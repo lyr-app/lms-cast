@@ -2658,19 +2658,33 @@
   ].join("\n");
   var LS_COPY = "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }";
 
-  function lsCompile(gl, vs, fs) {
+  // Why the light show is or is not on WebGL, for the receiver's diagnostics
+  // (LyrDisplays.glStatus()): a weak Chromecast fell back to the 2D drawing
+  // with no way to tell why (2026-10-11).
+  var LS_GL_STATUS = { state: "untried" };
+  function lsCompile(gl, vs, fs, label) {
     function sh(type, src) {
       var s = gl.createShader(type);
-      if (!s) return null;
+      if (!s) { LS_GL_STATUS.error = label + ": createShader null"; return null; }
       gl.shaderSource(s, src); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { gl.deleteShader(s); return null; }
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        var log = "";
+        try { log = String(gl.getShaderInfoLog(s) || ""); } catch (e) {}
+        LS_GL_STATUS.error = label + ": compile " + (type === gl.VERTEX_SHADER ? "vertex" : "fragment") + ": " + log.slice(0, 400);
+        gl.deleteShader(s); return null;
+      }
       return s;
     }
     var v = sh(gl.VERTEX_SHADER, vs), f = sh(gl.FRAGMENT_SHADER, fs);
     if (!v || !f) return null;
     var p = gl.createProgram();
     gl.attachShader(p, v); gl.attachShader(p, f); gl.bindAttribLocation(p, 0, "aP"); gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return null;
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      var ll = "";
+      try { ll = String(gl.getProgramInfoLog(p) || ""); } catch (e) {}
+      LS_GL_STATUS.error = label + ": link: " + ll.slice(0, 400);
+      return null;
+    }
     var u = {}, nu = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;
     for (var i = 0; i < nu; i++) { var info = gl.getActiveUniform(p, i); if (info) u[info.name] = gl.getUniformLocation(p, info.name); }
     return { p: p, u: u };
@@ -2681,11 +2695,20 @@
     var cv = makeCanvas(2, 2), gl = null;
     if (!cv || typeof cv.getContext !== "function") return null;
     try { gl = cv.getContext("webgl", { alpha: false, antialias: false, depth: false, preserveDrawingBuffer: false, powerPreference: "high-performance" }) || cv.getContext("experimental-webgl"); } catch (e) { gl = null; }
-    if (!gl || typeof gl.createShader !== "function" || typeof gl.getShaderParameter !== "function" || !gl.FRAGMENT_SHADER) return null;
+    if (!gl || typeof gl.createShader !== "function" || typeof gl.getShaderParameter !== "function" || !gl.FRAGMENT_SHADER) { LS_GL_STATUS = { state: "no-webgl" }; return null; }
+    LS_GL_STATUS = { state: "compiling" };
+    try {
+      var dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      LS_GL_STATUS.renderer = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || "");
+      LS_GL_STATUS.highp = !!(gl.getShaderPrecisionFormat && (gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT) || {}).precision);
+      LS_GL_STATUS.fragUniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+    } catch (e) {}
     var deriv = false;
     try { deriv = !!gl.getExtension("OES_standard_derivatives"); } catch (e) { deriv = false; }
-    var main = lsCompile(gl, LS_VERT, (deriv ? "#extension GL_OES_standard_derivatives : enable\n#define LS_DERIV 1\n" : "") + LS_FRAG), blit = lsCompile(gl, LS_VERT, LS_BLIT), copy = lsCompile(gl, LS_VERT, LS_COPY);
-    if (!main || !blit || !copy) return null;
+    LS_GL_STATUS.derivatives = deriv;
+    var main = lsCompile(gl, LS_VERT, (deriv ? "#extension GL_OES_standard_derivatives : enable\n#define LS_DERIV 1\n" : "") + LS_FRAG, "main"), blit = main && lsCompile(gl, LS_VERT, LS_BLIT, "blit"), copy = blit && lsCompile(gl, LS_VERT, LS_COPY, "copy");
+    if (!main || !blit || !copy) { LS_GL_STATUS.state = "failed"; return null; }
+    LS_GL_STATUS.state = "ok";
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -2848,7 +2871,12 @@
       if (R.lsGl === undefined) R.lsGl = lsGl();
       var G = R.lsGl;
       if (G && G.lost) G = R.lsGl = null;
-      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, 1080) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
+      // Memory: the GL side holds three buffers of this size (two for the
+      // trails, one to show), 4 bytes a pixel — ~25 MB at 1920 x 1080. Capped
+      // at 1080 lines and at 1.5x the CSS height (a Chromecast at 960 x 540
+      // CSS draws 810 lines, ~14 MB, not 1080).
+      var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
+      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, 1080, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
       c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
       if (G) {
         try { lsGlDraw(G, L, rw, rh); c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh); }
@@ -3318,11 +3346,18 @@
     this._wake();
   };
   P.setView = function (view, variant) {
+    var was = this.view;
     this.view = IMPL[view] ? view : "cassette";
+    // Leaving the light show gives its GPU buffers and state back at once.
+    if (was === "lightshow" && this.view !== "lightshow") this._releaseLightshow();
     var def = VIEWS.filter(function (v) { return v.id === this.view; }, this)[0];
     var vs = def && def.variants ? def.variants.map(function (x) { return x.id; }) : [];
     this.variant = vs.length ? (vs.indexOf(variant) >= 0 ? variant : vs[0]) : "";
     this._wake();
+  };
+  P._releaseLightshow = function () {
+    if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
+    this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0;
   };
   P.destroy = function () {
     this.dead = true;
@@ -3337,8 +3372,7 @@
     if (doc && doc.fonts && typeof doc.fonts.removeEventListener === "function") doc.fonts.removeEventListener("loadingdone", this._onFonts);
     if (this.artImg) { this.artImg.onload = this.artImg.onerror = null; }
     this.layer = this.label = this.arm = this.art = this.artImg = null; this.grads = {}; this.grain = null;
-    if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
-    this.lsGl = null; this.ls2d = null;
+    this._releaseLightshow();
   };
 
   // The cover on screen stays until its replacement has LOADED. Hosts get
@@ -3727,6 +3761,7 @@
     VIEWS: VIEWS,
     decodeLevels: decodeLevels,
     decodeSpectrum: decodeSpectrum,
+    glStatus: function () { return LS_GL_STATUS; },
     parseLrc: parseLrc,
     formatText: formatText,
     create: function (canvas, opts) { return new Display(canvas, opts); },

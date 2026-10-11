@@ -720,6 +720,7 @@
             dpr: window.devicePixelRatio,
             hidden: document.hidden,
             renderer: lib ? { views: lib.VIEWS.map((v) => v.id), loadedAt: window.__rendererLoadedAt || null } : { missing: true, error: window.__rendererLoadError || null },
+            lightshowGl: lib && typeof lib.glStatus === 'function' ? lib.glStatus() : null,
             art: displayRenderer ? { shown: !!displayRenderer.art, pending: !!displayRenderer.artImg, want: String(displayRenderer.artWant || '').slice(0, 60), url: String(displayRenderer.artUrl || '').slice(0, 60) } : null,
             view: displayKey || null,
             canvas: cv ? { w: cv.width, h: cv.height, css: r ? { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) } : null } : null,
