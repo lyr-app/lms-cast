@@ -3079,7 +3079,12 @@
           var fps = R.lsFn / R.lsFt, cur = R.lsQ || 1;
           // For the receiver's report: what it actually manages.
           LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id; LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && G.weak && !(X.direct === false) ? "+direct" : "") + " px" + R.pxCap;
-          if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
+          // Lowering the render size only helps where pixels are the cost. On a
+          // 3rd-gen Chromecast fps stayed 21-24 from 144 to 216 lines and from
+          // 640x360 to 1920x1080 canvases, so a weak GPU keeps its size: the
+          // drop to 40 % only blurred it (2026-10-11).
+          if (G && G.weak) { R.lsQ = 1; }
+          else if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
           else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
           else R.lsUp = 0;
           R.lsFt = 0; R.lsFn = 0;
