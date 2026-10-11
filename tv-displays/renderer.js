@@ -2009,6 +2009,8 @@
   };
   // How busy each scene looks, 0 calm .. 1 intense: calm tracks lean to calm scenes.
   var LS_SCENE_INTENSITY = { liquid: 0.1, julia: 0.25, kaleido: 0.3, scope: 0.35, spiral: 0.4, fractal: 0.45, matrix: 0.5, grid: 0.55, tunnel: 0.6, eq: 0.65, rings: 0.7, warp: 0.8, lasers: 0.9 };
+  // Skipped on a weak GPU: the noise-heavy and iteration-heavy scenes.
+  var LS_HEAVY_SCENES = ["liquid", "kaleido", "fractal", "julia", "scope"];
   var LS_PALETTE_IDS = ["rainbow", "neon", "fire", "ice", "acid", "sunset", "candy", "pastel"];
   // post: 0 none, 1 phosphor screen, 2 pixels, 3 soft glow.
   var LS_FLAVOURS = {
@@ -2174,8 +2176,11 @@
   }
   function lsPickScene(L) {
     var rnd = L.rnd, F = LS_FLAVOURS[L.flavour] || LS_FLAVOURS.journey, all = F.scenes, i;
-    var pool = all.filter(function (s) { return L.recent.indexOf(s) < 0; });
-    if (!pool.length) pool = all;
+    var ok = all.filter(function (s) { return !L.unsupported[s]; });
+    if (!ok.length) ok = LS_SCENES.filter(function (s) { return !L.unsupported[s]; });
+    if (!ok.length) ok = all;
+    var pool = ok.filter(function (s) { return L.recent.indexOf(s) < 0; });
+    if (!pool.length) pool = ok;
     var wsum = 0, ws = pool.map(function (s) { var dI = (LS_SCENE_INTENSITY[s] - L.mood) / 0.3, w = Math.exp(-dI * dI) + 0.05; wsum += w; return w; });
     var pick = rnd() * wsum, id = pool[pool.length - 1];
     for (i = 0; i < pool.length; i++) { pick -= ws[i]; if (pick <= 0) { id = pool[i]; break; } }
@@ -2201,7 +2206,7 @@
     this.t = 0; this.goS = 0.2; this.mood = 0.3; this.punch = 0; this.surge = 0; this.zoomFlow = 0.3; this.zoomPS = 0.1; this.spinK = 0.3; this.dt = 0;
     this.env = 0; this.beat = 0; this.kickT = 0; this.kick = 0; this.glow = 0; this.flash = 0; this.flashT = 0;
     this.bands = new Float32Array(16); this.bass = 0; this.mid = 0; this.treb = 0; this.level = 0;
-    this.recent = []; this.next = null; this.mix = 0; this.mixDur = 4; this.trans = 0;
+    this.recent = []; this.next = null; this.mix = 0; this.mixDur = 4; this.trans = 0; this.unsupported = {}; this.weakSet = false;
     this.lastPos = -1; this.bi = 0; this.di = 0; this.beatCount = 0; this.beatIdx = -1; this.an = null; this.anFor = null;
     this.titleT = 0; this.titleKey = "";
     this.cur = lsPickScene(this);
@@ -2219,6 +2224,18 @@
         sc.cT = p[0].slice(); sc.dT = p[1].slice();
       });
     }
+  };
+  // A scene that cannot draw on this GPU is swapped before it is ever shown.
+  // False when nothing usable is left.
+  LightShow.prototype.replaceCurrent = function () {
+    var sc = lsPickScene(this);
+    if (this.unsupported[sc.id]) return false;
+    this.cur = sc; return true;
+  };
+  LightShow.prototype.replaceNext = function () {
+    var sc = lsPickScene(this);
+    if (this.unsupported[sc.id]) return false;
+    this.next = sc; return true;
   };
   LightShow.prototype.setFlavour = function (f) {
     f = LS_FLAVOURS[f] ? f : "journey";
@@ -2370,7 +2387,8 @@
   // Scene functions take (p, a, b, k, q, t, c, d): a, b = drifting shape
   // values; k, q = the scene's constants (counts, directions, speeds); t = its
   // clock; c, d = palette. Counts and speeds must come from k and q only.
-  var LS_FRAG = [
+  // Shared by every scene program: precision, helpers, the music uniforms.
+  var LS_COMMON = [
     "#ifdef GL_FRAGMENT_PRECISION_HIGH",
     "precision highp float;",
     "#else",
@@ -2387,10 +2405,7 @@
     "#endif",
     "float lodw(float w){ return 1.0 - smoothstep(0.25, 0.6, w); }",
     "float lod(float x){ return lodw(fw(x)); }",
-    "uniform float uPx;",
-    "uniform float uAspect, uBass, uMid, uTreb, uBeat, uGlow, uLevel, uFlash, uMix, uTk, uFb, uZoom, uRot, uPunch;",
-    "uniform float uSA, uSB, uTA, uTB; uniform vec4 uWA0, uWA1, uKA0, uKA1, uWB0, uWB1, uKB0, uKB1; uniform vec3 uCA, uDA, uCB, uDB;",
-    "uniform sampler2D uPrev, uSpec;",
+    "uniform float uPx, uAspect, uBass, uMid, uTreb, uBeat, uGlow, uLevel; uniform sampler2D uSpec;",
     "const float TAU = 6.2831853;",
     "vec3 pal(float t, vec3 c, vec3 d){ return 0.5 + 0.5 * cos(TAU * (c * t + d)); }",
     "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
@@ -2399,6 +2414,13 @@
     "float fbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ v += a * noise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return v; }",
     "mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }",
     "float band(float x){ return texture2D(uSpec, vec2(clamp(x, 0.0, 1.0) * 0.9375 + 0.03125, 0.5)).r; }",
+  ].join("\n");
+  // One small program per scene (index = LS_SCENES). A single program with
+  // all thirteen did not link on a Vivante GC1000 (the second house's 3rd-gen
+  // Chromecast, "link:" with an empty log, 2026-10-11), and drew the 2D
+  // fallback there; a scene that still fails on a device is skipped on it.
+  var LS_SCENE_SRC = [
+    [
     // 0 tunnel
     "vec3 sTunnel(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float sides = floor(3.0 + k.x * 6.0), seg = TAU / sides;",
@@ -2419,6 +2441,8 @@
     "  col *= smoothstep(0.0, 0.18, rr);",
     "  col += pal(0.3, c, d) * exp(-rr * 9.0) * (0.4 + uGlow);",
     "  return col; }",
+  ].join("\n"),
+    [
     // 1 hyperspace
     "vec3 sWarp(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float ang = atan(p.y, p.x), r = length(p); vec3 col = vec3(0.0);",
@@ -2434,6 +2458,8 @@
     "  col += pal(0.5 + b.z, c, d) * exp(-r * 3.5) * (0.15 + uGlow * 0.4);",
     "  col += pal(0.8, c, d) * smoothstep(0.6, 1.8, r) * fbm(p * 1.5 + t * 0.05) * 0.15 * b.w;",
     "  return col; }",
+  ].join("\n"),
+    [
     // 2 kaleidoscope
     "vec3 sKaleido(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float n = floor(3.0 + k.x * 9.0), r = length(p), seg = 3.1415927 / n;",
@@ -2446,6 +2472,8 @@
     "  vec3 col = pal(f * 1.4 + r * b.z + a.w, c, d) * (0.2 + f * f * 1.6);",
     "  col += e * pal(f + 0.33, c, d) * (0.3 + uTreb * 0.6 + uGlow);",
     "  return col * (1.0 + uGlow * 0.3); }",
+  ].join("\n"),
+    [
     // 3 kali fractal
     "vec3 sFractal(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     // Zoomed in with 9 iterations: at 12 and full view its detail was finer
@@ -2457,6 +2485,8 @@
     "  vec3 col = pal(acc * 0.12 + b.y + tr, c, d) * clamp(acc * 0.25, 0.0, 1.5);",
     "  col += pal(acc * 0.1 + 0.5, c, d) * smoothstep(0.03 + fw(tr) * 1.5, 0.0, tr) * lod(tr * 20.0) * (0.3 + uTreb * 0.5 + uGlow);",
     "  return col; }",
+  ].join("\n"),
+    [
     // 4 julia
     "vec3 sJulia(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float dir = k.x > 0.5 ? 1.0 : -1.0, th = t * 0.04 * dir + k.y * TAU + a.y * 0.6;",
@@ -2480,6 +2510,8 @@
     "  float onSet = smoothstep(0.0, 2.5, dist), halo = exp(-dist / 7.0);",
     "  vec3 outside = pal(v * 1.5 + b.x, c, d) * smoothstep(0.0, 0.35, v) * 0.9;",
     "  return (outside + pal(b.x + 0.25, c, d) * halo * (1.1 + uGlow)) * onSet + pal(b.x + 0.5, c, d) * 0.04 * (1.0 - onSet); }",
+  ].join("\n"),
+    [
     // 5 spiral
     "vec3 sSpiral(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float r = length(p), ang = atan(p.y, p.x), lr = log(r + 0.001);",
@@ -2492,6 +2524,8 @@
     "  vec3 col = pal(lr * 0.25 - t * 0.015 + 0.1 * sin(ang * arms) + b.w, c, d) * m;",
     "  col += pal(0.6 + b.w, c, d) * exp(-r * 5.0) * (0.3 + uBass * 0.6 + uGlow);",
     "  return col; }",
+  ].join("\n"),
+    [
     // 6 liquid
     "vec3 sLiquid(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  p *= 0.8 + a.x * 1.6;",
@@ -2500,6 +2534,8 @@
     "  float f = fbm(p + (2.5 + a.y * 3.0 + uBass * 1.2) * r);",
     "  vec3 col = pal(f * 1.2 + length(qq) * 0.6 + b.x, c, d);",
     "  return col * (0.2 + f * f * 1.8 + uGlow * 0.25); }",
+  ].join("\n"),
+    [
     // 7 spectrum rings
     "vec3 sRings(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  p = rot(t * (k.x - 0.5) * 0.3) * p;",
@@ -2517,6 +2553,8 @@
     "  float e = fract(r * 1.8 - t * 0.4);",
     "  col += pal(r + b.w, c, d) * smoothstep(0.03, 0.0, abs(e - 0.5)) * 0.12 * (1.0 + uLevel * 1.5);",
     "  return col; }",
+  ].join("\n"),
+    [
     // 8 lasers
     "vec3 sLasers(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  vec3 col = vec3(0.0); float nbeam = 4.0 + floor(k.x * 8.0);",
@@ -2534,6 +2572,8 @@
     "  }",
     "  col += pal(0.7 + b.z, c, d) * fbm(p * 2.0 + vec2(t * 0.1, 0.0)) * (0.08 + a.w * 0.12);",
     "  return col; }",
+  ].join("\n"),
+    [
     // 9 retro grid
     "vec3 sGrid(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float hz = -0.08 + (a.x - 0.5) * 0.15; vec3 col = vec3(0.0);",
@@ -2548,6 +2588,8 @@
     "  float ln = max(smoothstep(0.02 * z + fw(xx), 0.0, gx) * lod(xx), smoothstep(0.03 * z + fw(zz), 0.0, gz) * lod(zz));",
     "  vec3 floorCol = pal(b.x + 0.9, c, d) * 0.06 + pal(b.x + 0.85 + z * 0.02, c, d) * ln * exp(-z * 0.12) * (1.0 + uGlow * 1.2);",
     "  return mix(col, floorCol, smoothstep(hz + 0.004, hz - 0.004, p.y)); }",
+  ].join("\n"),
+    [
     // 10 oscilloscope: a Lissajous figure turning slowly, wobbled by the bands, over a graticule
     "vec3 sScope(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float fa = 1.0 + floor(k.x * 4.0), fb = fa + 1.0 + floor(k.y * 2.0), ph = t * (0.12 + k.z * 0.2);",
@@ -2564,6 +2606,8 @@
     "  vec2 g = abs(fract(p * 2.5 + 0.5) - 0.5) / 2.5, ax = abs(p);",
     "  float grat = smoothstep(uPx * 1.2, 0.0, min(g.x, g.y)) * 0.07 + smoothstep(uPx * 1.2, 0.0, min(ax.x, ax.y)) * 0.06;",
     "  return pal(b.y, c, d) * (line * 1.5 + glow * 0.45) + vec3(grat); }",
+  ].join("\n"),
+    [
     // 11 digital rain: columns of square cells, a bright head falling and a fading trail
     "vec3 sMatrix(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float cols = 28.0 + floor(k.x * 24.0), cw = 2.0 * uAspect / cols;",
@@ -2574,6 +2618,8 @@
     "  float on = step(0.22, hash(cell + vec2(floor(k.w * 50.0), 3.0))), lv = band(cell.x / cols);",
     "  float sq = smoothstep(0.5, 0.4, max(abs(f.x), abs(f.y))) * smoothstep(1.55, 1.2, head);",
     "  return pal(b.y + cell.x / cols * 0.2, c, d) * (trail * on * (0.45 + lv) + hd * 1.3) * sq; }",
+  ].join("\n"),
+    [
     // 12 LED equaliser: straight bars of lit segments, the top segment lit in proportion (no flicker)
     "vec3 sEq(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float nb = 16.0 + floor(k.x * 4.0) * 8.0, x = p.x / (2.0 * uAspect) + 0.5;",
@@ -2583,32 +2629,40 @@
     "  float cellm = smoothstep(0.0, 0.14, fract(sy)) * smoothstep(1.0, 0.86, fract(sy)) * smoothstep(0.06, 0.14, fx) * smoothstep(0.94, 0.86, fx);",
     "  vec3 tone = pal(b.y + yb * 0.45 + bi / nb * 0.15, c, d);",
     "  return tone * cellm * (lit * 1.35 + 0.05); }",
-    "vec3 scene(float s, vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
-    "  if (s < 0.5) return sTunnel(p, a, b, k, q, t, c, d);",
-    "  if (s < 1.5) return sWarp(p, a, b, k, q, t, c, d);",
-    "  if (s < 2.5) return sKaleido(p, a, b, k, q, t, c, d);",
-    "  if (s < 3.5) return sFractal(p, a, b, k, q, t, c, d);",
-    "  if (s < 4.5) return sJulia(p, a, b, k, q, t, c, d);",
-    "  if (s < 5.5) return sSpiral(p, a, b, k, q, t, c, d);",
-    "  if (s < 6.5) return sLiquid(p, a, b, k, q, t, c, d);",
-    "  if (s < 7.5) return sRings(p, a, b, k, q, t, c, d);",
-    "  if (s < 8.5) return sLasers(p, a, b, k, q, t, c, d);",
-    "  if (s < 9.5) return sGrid(p, a, b, k, q, t, c, d);",
-    "  if (s < 10.5) return sScope(p, a, b, k, q, t, c, d);",
-    "  if (s < 11.5) return sMatrix(p, a, b, k, q, t, c, d);",
-    "  return sEq(p, a, b, k, q, t, c, d); }",
+  ].join("\n"),
+  ];
+  var LS_SCENE_FN = ["sTunnel", "sWarp", "sKaleido", "sFractal", "sJulia", "sSpiral", "sLiquid", "sRings", "sLasers", "sGrid", "sScope", "sMatrix", "sEq"];
+  // A scene renders to its own texture at half brightness (headroom: RGBA8
+  // clips at 1), the composite doubles it back before the feedback and tone map.
+  function lsSceneFrag(i) {
+    return LS_COMMON + "\n" + LS_SCENE_SRC[i] + "\n" + [
+      "uniform vec4 uW0, uW1, uK0, uK1; uniform vec3 uC, uD; uniform float uT, uPunch;",
+      "void main(){",
+      "  vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0 * (1.0 - uPunch);",
+      "  gl_FragColor = vec4(min(" + LS_SCENE_FN[i] + "(p, uW0, uW1, uK0, uK1, uT, uC, uD) * 0.5, vec3(1.0)), 1.0);",
+      "}",
+    ].join("\n");
+  }
+  // Blend of the two scenes (fade, soft iris, soft dissolve), the feedback
+  // trails, the flash and the tone map, into the next trails buffer.
+  var LS_COMPOSITE = [
+    "precision mediump float;",
+    "varying vec2 vUv;",
+    "uniform sampler2D uA, uB, uPrev; uniform float uAspect, uMix, uTk, uFb, uZoom, uRot, uFlash;",
+    "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+    "float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);",
+    "  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }",
+    "float fbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ v += a * noise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return v; }",
+    "mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }",
     "void main(){",
-    // uPunch: a slow push in on a drop (and on the beat only at Beat strength
-    // above three quarters).
-    "  vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0 * (1.0 - uPunch);",
-    "  vec3 col = scene(uSA, p, uWA0, uWA1, uKA0, uKA1, uTA, uCA, uDA);",
+    "  vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0;",
+    "  vec3 col = texture2D(uA, vUv).rgb * 2.0;",
     "  if (uMix > 0.0005){",
-    "    vec3 cb = scene(uSB, p, uWB0, uWB1, uKB0, uKB1, uTB, uCB, uDB); float m = uMix;",
+    "    vec3 cb = texture2D(uB, vUv).rgb * 2.0; float m = uMix;",
     "    if (uTk > 0.5 && uTk < 1.5){ float rd = length(p) / (uAspect + 0.2); m = 1.0 - smoothstep(m * 1.6 - 0.5, m * 1.6, rd); }",
     "    else if (uTk > 1.5){ float nz = fbm(p * 1.5 + 3.0); m = smoothstep(nz - 0.3, nz + 0.3, uMix * 1.6 - 0.3); }",
     "    col = mix(col, cb, clamp(m, 0.0, 1.0));",
     "  }",
-    // Feedback: the last frame, zoomed and turned, shows where this one is dark.
     "  vec2 fp = rot(uRot) * ((vUv - 0.5) * vec2(uAspect, 1.0)) / uZoom;",
     "  vec2 tc = fp / vec2(uAspect, 1.0) + 0.5;",
     "  vec2 ed = smoothstep(0.0, 0.03, tc) * smoothstep(1.0, 0.97, tc);",
@@ -2706,15 +2760,19 @@
     var deriv = false;
     try { deriv = !!gl.getExtension("OES_standard_derivatives"); } catch (e) { deriv = false; }
     LS_GL_STATUS.derivatives = deriv;
-    var main = lsCompile(gl, LS_VERT, (deriv ? "#extension GL_OES_standard_derivatives : enable\n#define LS_DERIV 1\n" : "") + LS_FRAG, "main"), blit = main && lsCompile(gl, LS_VERT, LS_BLIT, "blit"), copy = blit && lsCompile(gl, LS_VERT, LS_COPY, "copy");
-    if (!main || !blit || !copy) { LS_GL_STATUS.state = "failed"; return null; }
+    var comp = lsCompile(gl, LS_VERT, LS_COMPOSITE, "composite"), blit = comp && lsCompile(gl, LS_VERT, LS_BLIT, "blit"), copy = blit && lsCompile(gl, LS_VERT, LS_COPY, "copy");
+    if (!comp || !blit || !copy) { LS_GL_STATUS.state = "failed"; return null; }
     LS_GL_STATUS.state = "ok";
+    // A low-end GPU (old Chromecasts, early Mali/Adreno, VideoCore): fewer
+    // pixels and only the lighter scenes, or it crawls.
+    var weak = /Vivante|Mali-[34]|Mali-T[67]|VideoCore|PowerVR SGX|Adreno \(TM\) [23]/i.test(LS_GL_STATUS.renderer || "");
+    LS_GL_STATUS.weak = weak; LS_GL_STATUS.sceneFails = [];
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    var G = { cv: cv, gl: gl, main: main, blit: blit, copy: copy, spec: lsTex(gl), fb: [null, null], tx: [null, null], w: 0, h: 0, cur: 0, lost: false, specBuf: new Uint8Array(16) };
+    var G = { cv: cv, gl: gl, comp: comp, blit: blit, copy: copy, deriv: deriv, weak: weak, scenes: [], spec: lsTex(gl), fb: [null, null], tx: [null, null], sfb: [null, null], stx: [null, null], w: 0, h: 0, cur: 0, lost: false, specBuf: new Uint8Array(16) };
     if (typeof cv.addEventListener === "function") {
       cv.addEventListener("webglcontextlost", function (e) { G.lost = true; if (e && e.preventDefault) e.preventDefault(); });
     }
@@ -2750,25 +2808,62 @@
       gl.uniform1i(G.copy.u.uTex, 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
-    for (i = 0; i < 2; i++) { if (G.tx[i]) gl.deleteTexture(G.tx[i]); if (G.fb[i]) gl.deleteFramebuffer(G.fb[i]); }
+    for (i = 0; i < 2; i++) {
+      if (G.tx[i]) gl.deleteTexture(G.tx[i]); if (G.fb[i]) gl.deleteFramebuffer(G.fb[i]);
+      if (G.stx[i]) gl.deleteTexture(G.stx[i]); if (G.sfb[i]) gl.deleteFramebuffer(G.sfb[i]);
+      // The two scene buffers (current, next) are redrawn every frame: no copy.
+      G.stx[i] = lsTex(gl); G.sfb[i] = gl.createFramebuffer();
+      gl.bindTexture(gl.TEXTURE_2D, G.stx[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, G.sfb[i]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, G.stx[i], 0);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     G.tx = tx; G.fb = fb; G.cv.width = w; G.cv.height = h; G.w = w; G.h = h;
   }
-  function lsSceneUniforms(gl, u, L, sc, x) {
-    var p = L.params(sc), k = sc.k, hue = sc.post === 1 ? 0 : sc.hue;
-    gl.uniform1f(u["uS" + x], sc.idx);
-    gl.uniform1f(u["uT" + x], sc.time % 2000);
-    gl.uniform4f(u["uW" + x + "0"], p[0], p[1], p[2], p[3]);
-    gl.uniform4f(u["uW" + x + "1"], p[4], p[5], p[6], p[7]);
-    gl.uniform4f(u["uK" + x + "0"], k[0], k[1], k[2], k[3]);
-    gl.uniform4f(u["uK" + x + "1"], k[4], k[5], k[6], k[7]);
-    gl.uniform3f(u["uC" + x], sc.c[0], sc.c[1], sc.c[2]);
-    gl.uniform3f(u["uD" + x], sc.d[0] + hue, sc.d[1] + hue, sc.d[2] + hue);
+  // The scene's program, built the first time it is needed; false = it does
+  // not compile or link on this GPU, and the scene is skipped here.
+  function lsSceneProg(G, i) {
+    if (G.scenes[i] !== undefined) return G.scenes[i];
+    var pr = lsCompile(G.gl, LS_VERT, (G.deriv ? "#extension GL_OES_standard_derivatives : enable\n#define LS_DERIV 1\n" : "") + lsSceneFrag(i), LS_SCENES[i]);
+    if (!pr) LS_GL_STATUS.sceneFails.push(LS_SCENES[i] + (LS_GL_STATUS.error ? " (" + String(LS_GL_STATUS.error).slice(0, 120) + ")" : ""));
+    G.scenes[i] = pr || false;
+    return G.scenes[i];
   }
+  function lsDrawScene(G, L, sc, pr, slot, w, h) {
+    var gl = G.gl, u = pr.u, ps = L.params(sc), k = sc.k, hue = sc.post === 1 ? 0 : sc.hue;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, G.sfb[slot]);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(pr.p);
+    gl.uniform1i(u.uSpec, 1);
+    gl.uniform1f(u.uAspect, w / h); gl.uniform1f(u.uPx, 2 / h);
+    gl.uniform1f(u.uBass, L.bass); gl.uniform1f(u.uMid, L.mid); gl.uniform1f(u.uTreb, L.treb);
+    gl.uniform1f(u.uBeat, L.beat); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level);
+    gl.uniform1f(u.uPunch, L.punch);
+    gl.uniform1f(u.uT, sc.time % 2000);
+    gl.uniform4f(u.uW0, ps[0], ps[1], ps[2], ps[3]);
+    gl.uniform4f(u.uW1, ps[4], ps[5], ps[6], ps[7]);
+    gl.uniform4f(u.uK0, k[0], k[1], k[2], k[3]);
+    gl.uniform4f(u.uK1, k[4], k[5], k[6], k[7]);
+    gl.uniform3f(u.uC, sc.c[0], sc.c[1], sc.c[2]);
+    gl.uniform3f(u.uD, sc.d[0] + hue, sc.d[1] + hue, sc.d[2] + hue);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  // Returns false when no scene of this flavour works on this GPU (the caller
+  // falls back to the 2D drawing).
   function lsGlDraw(G, L, w, h) {
-    var gl = G.gl, u = G.main.u, src = G.cur, dst = 1 - src, F = LS_FLAVOURS[L.flavour], sm = L.sm;
+    var gl = G.gl, src = G.cur, dst = 1 - src, F = LS_FLAVOURS[L.flavour], sm = L.sm;
+    if (G.weak && !L.weakSet) { L.weakSet = true; LS_HEAVY_SCENES.forEach(function (id) { L.unsupported[id] = true; }); if (L.unsupported[L.cur.id]) L.replaceCurrent(); }
+    // Current and next scenes need a working program; one that fails is
+    // marked and replaced at once (it was never drawn, so nothing jumps).
+    for (var tries = 0; tries < LS_SCENES.length; tries++) {
+      if (!lsSceneProg(G, L.cur.idx)) { L.unsupported[L.cur.id] = true; if (!L.replaceCurrent()) return false; continue; }
+      if (L.next && !lsSceneProg(G, L.next.idx)) { L.unsupported[L.next.id] = true; if (!L.replaceNext()) L.next = null; continue; }
+      break;
+    }
+    if (!lsSceneProg(G, L.cur.idx)) return false;
     lsGlSize(G, w, h);
-    // The bands as a 1-row texture: the shader reads it interpolated.
+    // The bands as a 1-row texture: the scenes read it interpolated.
     var n = L.bands.length;
     if (G.specBuf.length !== n) G.specBuf = new Uint8Array(n);
     for (var i = 0; i < n; i++) G.specBuf[i] = Math.round(clamp(L.bands[i], 0, 1) * 255);
@@ -2776,28 +2871,28 @@
     gl.bindTexture(gl.TEXTURE_2D, G.spec);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, n, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, G.specBuf);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, G.tx[src]);
+    var nx = L.next || L.cur, m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
+    lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], 0, w, h);
+    if (L.next && m > 0.0005) lsDrawScene(G, L, L.next, G.scenes[L.next.idx], 1, w, h);
+    // Composite: the blend, the trails, the flash, the tone map.
+    var cu = G.comp.u;
     gl.bindFramebuffer(gl.FRAMEBUFFER, G.fb[dst]);
     gl.viewport(0, 0, w, h);
-    gl.useProgram(G.main.p);
-    gl.uniform1i(u.uPrev, 0); gl.uniform1i(u.uSpec, 1);
-    gl.uniform1f(u.uAspect, w / h);
-    gl.uniform1f(u.uBass, L.bass); gl.uniform1f(u.uMid, L.mid); gl.uniform1f(u.uTreb, L.treb);
-    gl.uniform1f(u.uBeat, L.beat); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level); gl.uniform1f(u.uFlash, L.flash);
-    gl.uniform1f(u.uPunch, L.punch);
-    gl.uniform1f(u.uPx, 2 / h);
-    var nx = L.next || L.cur, m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
-    lsSceneUniforms(gl, u, L, L.cur, "A");
-    lsSceneUniforms(gl, u, L, nx, "B");
-    gl.uniform1f(u.uMix, m); gl.uniform1f(u.uTk, L.trans);
+    gl.useProgram(G.comp.p);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.stx[0]);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, G.stx[1]);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, G.tx[src]);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1i(cu.uA, 0); gl.uniform1i(cu.uB, 2); gl.uniform1i(cu.uPrev, 3);
+    gl.uniform1f(cu.uAspect, w / h);
+    gl.uniform1f(cu.uMix, m); gl.uniform1f(cu.uTk, L.trans); gl.uniform1f(cu.uFlash, L.flash);
     // Trails slider: 0 = none, 1 = long trails that tunnel into themselves.
     var tr = clamp(sm.trails * F.trails, 0, 1), fbVar = L.cur.fbVar * (1 - m) + nx.fbVar * m, zVar = L.cur.zoomVar * (1 - m) + nx.zoomVar * m;
-    gl.uniform1f(u.uFb, Math.min(0.95, 0.94 * Math.pow(tr, 0.8) * fbVar));
+    gl.uniform1f(cu.uFb, Math.min(0.95, 0.94 * Math.pow(tr, 0.8) * fbVar));
     // The trails flow at the travel speed: a calm track's trails drift.
     var fdt = Math.min(0.1, L.dt || 1 / 60);
-    gl.uniform1f(u.uZoom, Math.exp(L.zoomPS * zVar * fdt));
-    gl.uniform1f(u.uRot, (L.cur.spin * (1 - m) + nx.spin * m) * L.spinK * fdt);
+    gl.uniform1f(cu.uZoom, Math.exp(L.zoomPS * zVar * fdt));
+    gl.uniform1f(cu.uRot, (L.cur.spin * (1 - m) + nx.spin * m) * L.spinK * fdt);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     // To the visible canvas: the flavour's finish, colour and brightness.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -2816,6 +2911,7 @@
     gl.uniform1f(G.blit.u.uBright, 1 + Math.max(0, sm.colour - 0.5) * 0.5);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     G.cur = dst;
+    return true;
   }
 
   // --- 2D fallback -------------------------------------------------------------
@@ -2876,11 +2972,14 @@
       // at 1080 lines and at 1.5x the CSS height (a Chromecast at 960 x 540
       // CSS draws 810 lines, ~14 MB, not 1080).
       var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
-      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, 1080, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
+      var cap = G && G.weak ? 540 : 1080;
+      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
       c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
       if (G) {
-        try { lsGlDraw(G, L, rw, rh); c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh); }
-        catch (e) { R.lsGl = null; }
+        try {
+          if (lsGlDraw(G, L, rw, rh)) { c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh); }
+          else { LS_GL_STATUS.state = "no-scene"; R._releaseLightshowGl(); R.lsGl = null; }
+        } catch (e) { LS_GL_STATUS.state = "draw-error: " + String(e && e.message || e).slice(0, 120); R.lsGl = null; }
       } else {
         ls2dDraw(R, Math.max(2, Math.round(rw / 2)), Math.max(2, Math.round(rh / 2)));
         if (R.ls2d) c.drawImage(R.ls2d.cv, 0, 0, b.bw, b.bh);
@@ -3354,6 +3453,9 @@
     var vs = def && def.variants ? def.variants.map(function (x) { return x.id; }) : [];
     this.variant = vs.length ? (vs.indexOf(variant) >= 0 ? variant : vs[0]) : "";
     this._wake();
+  };
+  P._releaseLightshowGl = function () {
+    if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
   };
   P._releaseLightshow = function () {
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
