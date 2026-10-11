@@ -2950,6 +2950,45 @@
     if (L.flash > 0.01) { f.fillStyle = "rgba(255,255,255," + (Math.round(L.flash * 0.5 * 1000) / 1000) + ")"; f.fillRect(0, 0, w, h); }
   }
 
+  // The GL canvas placed over the renderer's canvas, filling its parent.
+  function lsDomAttach(R, G) {
+    var main = R.canvas, par = main && main.parentElement, st = G.cv && G.cv.style;
+    if (!par || !st || typeof par.appendChild !== "function" || typeof G.cv.getBoundingClientRect !== "function") return false;
+    if (G.cv.parentElement !== par) {
+      try { if (root.getComputedStyle && root.getComputedStyle(par).position === "static") par.style.position = "relative"; } catch (e) {}
+      st.position = "absolute"; st.left = "0"; st.top = "0"; st.width = "100%"; st.height = "100%"; st.pointerEvents = "none"; st.display = "block";
+      try { par.appendChild(G.cv); } catch (e) { return false; }
+    }
+    R.lsDom = true;
+    return true;
+  }
+  function lsDomDetach(R) {
+    var G = R.lsGl;
+    try { if (G && G.cv && G.cv.parentElement && G.cv.parentElement !== null && typeof G.cv.parentElement.removeChild === "function") G.cv.parentElement.removeChild(G.cv); } catch (e) {}
+    try { if (R.lsOv && R.lsOv.cv.parentElement) R.lsOv.cv.parentElement.removeChild(R.lsOv.cv); } catch (e) {}
+    R.lsOv = null; R.lsDom = false; R.lsDomFilled = false;
+  }
+  // A clear canvas over the GL one for the track title, at CSS size; made
+  // when first needed.
+  function lsOverlay(R, need) {
+    var par = R.canvas && R.canvas.parentElement;
+    if (!par) return null;
+    var w = Math.max(1, Math.round(num(par.clientWidth, 0))), h = Math.max(1, Math.round(num(par.clientHeight, 0)));
+    var ov = R.lsOv;
+    if (!ov) {
+      if (!need) return null;
+      var cv = makeCanvas(w, h), oc = null;
+      try { oc = cv && cv.getContext("2d"); } catch (e) { oc = null; }
+      if (!oc || !cv.style || typeof par.appendChild !== "function") return null;
+      var st = cv.style; st.position = "absolute"; st.left = "0"; st.top = "0"; st.width = "100%"; st.height = "100%"; st.pointerEvents = "none";
+      try { par.appendChild(cv); } catch (e) { return null; }
+      ov = R.lsOv = { cv: cv, c: oc };
+    }
+    if (ov.cv.width !== w) ov.cv.width = w;
+    if (ov.cv.height !== h) ov.cv.height = h;
+    return ov;
+  }
+
   IMPL.lightshow = {
     bg: "#000000",
     full: true,
@@ -2974,13 +3013,25 @@
       var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
       var cap = G && G.weak ? 540 : 1080;
       var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
-      c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
+      // On screen, the GL canvas sits over the renderer's own canvas and the
+      // browser scales it up (R.lsDom). Copying it into the 2D canvas every
+      // frame was the cost on a 3rd-gen Chromecast: 7 fps at 540 lines
+      // (2026-10-11). A snapshot (a different canvas) still copies.
+      var onScreen = c.canvas === R.canvas;
       if (G) {
         try {
-          if (lsGlDraw(G, L, rw, rh)) { c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh); }
-          else { LS_GL_STATUS.state = "no-scene"; R._releaseLightshowGl(); R.lsGl = null; }
-        } catch (e) { LS_GL_STATUS.state = "draw-error: " + String(e && e.message || e).slice(0, 120); R.lsGl = null; }
+          if (lsGlDraw(G, L, rw, rh)) {
+            if (onScreen && lsDomAttach(R, G)) {
+              if (!R.lsDomFilled) { c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh); R.lsDomFilled = true; }
+            } else {
+              c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
+              c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh);
+            }
+          } else { LS_GL_STATUS.state = "no-scene"; R._releaseLightshowGl(); R.lsGl = null; }
+        } catch (e) { LS_GL_STATUS.state = "draw-error: " + String(e && e.message || e).slice(0, 120); R._releaseLightshowGl(); R.lsGl = null; }
       } else {
+        lsDomDetach(R);
+        c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
         ls2dDraw(R, Math.max(2, Math.round(rw / 2)), Math.max(2, Math.round(rh / 2)));
         if (R.ls2d) c.drawImage(R.ls2d.cv, 0, 0, b.bw, b.bh);
       }
@@ -3000,12 +3051,24 @@
     },
     dyn: function (c, S, T, v, R) {
       var L = R.ls;
-      if (!L || !L.opts.title || !(L.titleT > 0) || !T.title) return;
+      var show = !!(L && L.opts.title && L.titleT > 0 && T.title);
+      // GL canvas on screen: the title goes on a clear overlay above it.
+      if (R.lsDom) {
+        var ov = lsOverlay(R, show);
+        if (!ov) return;
+        var oc = ov.c;
+        oc.setTransform(1, 0, 0, 1, 0, 0); oc.clearRect(0, 0, ov.cv.width, ov.cv.height);
+        if (!show) return;
+        var s0 = Math.min(ov.cv.width / W, ov.cv.height / H);
+        oc.setTransform(s0, 0, 0, s0, (ov.cv.width - W * s0) / 2, (ov.cv.height - H * s0) / 2);
+        c = oc;
+      }
+      if (!show) return;
       var a = Math.min(1, L.titleT / 1.5, (8 - L.titleT) / 0.8);
       if (!(a > 0)) return;
       c.globalAlpha = a;
       c.textAlign = "left"; c.textBaseline = "alphabetic";
-      c.shadowColor = "rgba(0,0,0,0.8)"; c.shadowBlur = 12 * (R.box.lw / W);
+      c.shadowColor = "rgba(0,0,0,0.8)"; c.shadowBlur = 12 * (R.lsDom ? 0.6 : R.box.lw / W);
       c.fillStyle = "#ffffff";
       c.fillText(fit(c, 700, 46, SANS, T.title, 1200, 0.6), 80, 800);
       if (T.artist) { c.fillStyle = "rgba(255,255,255,0.75)"; c.fillText(fit(c, 500, 30, SANS, T.artist, 1200, 0.6), 80, 845); }
@@ -3457,9 +3520,11 @@
     this._wake();
   };
   P._releaseLightshowGl = function () {
+    lsDomDetach(this);
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
   };
   P._releaseLightshow = function () {
+    lsDomDetach(this);
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
     this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0;
   };
