@@ -2010,7 +2010,10 @@
   // How busy each scene looks, 0 calm .. 1 intense: calm tracks lean to calm scenes.
   var LS_SCENE_INTENSITY = { liquid: 0.1, julia: 0.25, kaleido: 0.3, scope: 0.35, spiral: 0.4, fractal: 0.45, matrix: 0.5, grid: 0.55, tunnel: 0.6, eq: 0.65, rings: 0.7, warp: 0.8, lasers: 0.9 };
   // Skipped on a weak GPU: the noise-heavy and iteration-heavy scenes.
-  var LS_HEAVY_SCENES = ["liquid", "kaleido", "fractal", "julia", "scope"];
+  // Measured on a Vivante GC1000 (3rd-gen Chromecast), 2026-10-11: matrix
+  // ~21 fps and spiral ~13 fps at 360 lines; lasers 4-5 fps from 360 lines;
+  // warp does not link. Every scene tops out ~22 fps at 216 lines.
+  var LS_HEAVY_SCENES = ["liquid", "kaleido", "fractal", "julia", "scope", "lasers", "warp"];
   var LS_PALETTE_IDS = ["rainbow", "neon", "fire", "ice", "acid", "sunset", "candy", "pastel"];
   // post: 0 none, 1 phosphor screen, 2 pixels, 3 soft glow.
   var LS_FLAVOURS = {
@@ -3049,7 +3052,7 @@
       // CSS draws 810 lines, ~14 MB, not 1080).
       var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
       var X = L.opts.exp || {};
-      var cap = num(X.lines, 0) > 0 ? num(X.lines, 0) : G && G.weak ? 540 : 1080;
+      var cap = num(X.lines, 0) > 0 ? num(X.lines, 0) : G && G.weak ? 360 : 1080;
       var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
       // On screen, the GL canvas sits over the renderer's own canvas and the
       // browser scales it up (R.lsDom). Copying it into the 2D canvas every
@@ -3082,7 +3085,7 @@
           // For the receiver's report: what it actually manages.
           LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id; LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && G.weak && !(X.direct === false) ? "+direct" : "") + " px" + R.pxCap;
           if (num(X.q, 0) > 0) { R.lsQ = num(X.q, 1); }
-          else if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
+          else if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(G && G.weak ? 0.6 : 0.4, cur * 0.85); R.lsUp = 0; }
           else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
           else R.lsUp = 0;
           R.lsFt = 0; R.lsFn = 0;
