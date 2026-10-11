@@ -40,6 +40,7 @@
     { id: "lyrics", name: "Lyrics", description: "The words, in time with the music: the current line large, the lines around it smaller, scrolling as the track plays." },
     { id: "reel", name: "Reel-to-reel", description: "A portable reel-to-reel recorder. Tape runs from the supply reel past the heads to the take-up reel as the track plays, so the packs show how far in you are, and the smaller pack spins faster. A single modulation meter shows left and right as a white and a red needle." },
     { id: "clock", name: "Clock", description: "A standby screen: the time and date, with the track small at the bottom while something plays. It drifts slightly and dims when idle to spare the TV." },
+    { id: "lightshow", name: "Light show", description: "A club light show that moves to the beat: tunnels, hyperspace, kaleidoscopes, fractals, spirals, lasers and spectrum rings, changing at random so it never repeats. Each flavour has its own scenes, colours and finish. Beats come from this track's own spectrum; with none it drifts slowly." },
     { id: "turntable", name: "Turntable", description: "A record turns at 33⅓ while the tonearm moves in from the outer groove to the run-out as the track plays. The label carries the album art. It stops when you pause." },
   ];
 
@@ -1961,6 +1962,929 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Light show: a club-style visual that never loops. Ten scenes (tunnel,
+  // hyperspace, kaleidoscope, two fractals, spiral, liquid, spectrum rings,
+  // lasers, retro grid) drawn by one WebGL fragment shader over a feedback
+  // buffer (the last frame, zoomed and turned, so motion leaves trails). The
+  // next scene, its colours and the blend into it are picked at random, so the
+  // same picture never comes round twice.
+  //
+  // Everything moves SMOOTHLY (owner, 2026-10-11: "many of them have jumps …
+  // they should all be smooth"). The rules that keep it so:
+  // - Counts, directions and on/off choices (arms, mirror segments, which way
+  //   it spins, a second laser bank) are CONSTANTS for a scene's life (`k`),
+  //   picked when it starts. Only continuous shape values (`walks`) drift; a
+  //   drifting count snaps when it crosses a whole number.
+  // - Every speed is a constant times the scene's own clock. A drifting speed
+  //   times a growing clock lurches the whole picture.
+  // - Beats rise over ~40 ms and fall over ~150 ms, never in one frame; the
+  //   bands, travel speed, sliders and palette all ease the same way.
+  // - Scenes blend over 2.5-8 s (a drop starts a blend, it does not cut), and a
+  //   change of render size copies the trails into the new buffer.
+  //
+  // The beat is honest: `lsAnalyse` finds the track's TEMPO in its own spectrum
+  // (onset autocorrelation) and lays a steady beat grid along it (dynamic
+  // programming, Ellis 2007). A track without a steady pulse (fado, classical,
+  // ambient) gets no beats at all and flows with its loudness instead, and so
+  // does anything with no spectrum yet. Beats MOVE the picture (a camera push,
+  // speed, size); they only change its BRIGHTNESS when Flashes is on, which is
+  // off by default. Flashes never come faster than 2.5 a second. The camera
+  // itself stays still on the beat (no rock, no push at the default Beat
+  // strength): that read as shaking.
+  //
+  // Flavours are the variants; the sliders (setOptions) scale any flavour.
+  // Without WebGL (old browsers, the Node tests) a 2D version draws a radial
+  // spectrum over the same kind of feedback.
+  var LS_SCENES = ["tunnel", "warp", "kaleido", "fractal", "julia", "spiral", "liquid", "rings", "lasers", "grid", "scope", "matrix", "eq"];
+  var LS_PALETTES = {
+    rainbow: [[1, 1, 1], [0, 0.33, 0.67]],
+    neon: [[1, 1, 1], [0.8, 0.9, 0.3]],
+    fire: [[1, 0.7, 0.4], [0, 0.15, 0.2]],
+    ice: [[0.7, 0.9, 1], [0.55, 0.6, 0.75]],
+    acid: [[2, 1, 0], [0.5, 0.2, 0.25]],
+    sunset: [[1, 1, 0.5], [0.8, 0.9, 0.3]],
+    candy: [[1, 1, 1], [0.3, 0.2, 0.2]],
+    pastel: [[0.6, 0.6, 0.6], [0.1, 0.35, 0.55]],
+    mono: [[1, 1, 1], [0, 0, 0]],
+  };
+  // How busy each scene looks, 0 calm .. 1 intense: calm tracks lean to calm scenes.
+  var LS_SCENE_INTENSITY = { liquid: 0.1, julia: 0.25, kaleido: 0.3, scope: 0.35, spiral: 0.4, fractal: 0.45, matrix: 0.5, grid: 0.55, tunnel: 0.6, eq: 0.65, rings: 0.7, warp: 0.8, lasers: 0.9 };
+  var LS_PALETTE_IDS = ["rainbow", "neon", "fire", "ice", "acid", "sunset", "candy", "pastel"];
+  // post: 0 none, 1 phosphor screen, 2 pixels, 3 soft glow.
+  var LS_FLAVOURS = {
+    journey: { name: "Journey", scenes: LS_SCENES, palettes: ["rainbow", "neon", "fire", "ice", "acid", "sunset", "candy"], speed: 1, hue: 0.01, post: 0, flash: 1, trails: 1 },
+    dreamy: { name: "Dreamy", scenes: ["liquid", "kaleido", "julia", "spiral", "tunnel"], palettes: ["candy", "ice", "pastel", "sunset"], speed: 0.6, hue: 0.006, post: 3, flash: 0.5, trails: 1.3 },
+    cosmic: { name: "Cosmic", scenes: ["warp", "fractal", "tunnel", "julia", "rings"], palettes: ["ice", "neon", "rainbow", "candy"], speed: 0.85, hue: 0.006, post: 3, flash: 0.7, trails: 1.1 },
+    trippy: { name: "Trippy", scenes: ["kaleido", "spiral", "fractal", "julia", "liquid", "tunnel"], palettes: ["acid", "rainbow", "neon", "candy"], speed: 1.1, hue: 0.04, post: 0, flash: 1, trails: 1.3 },
+    oldschool: { name: "Old school", scenes: ["rings", "lasers", "tunnel", "spiral", "warp"], palettes: ["rainbow", "acid", "fire"], speed: 1, hue: 0.02, post: 0, flash: 1, trails: 0.8 },
+    // Analog and Digital share no scene and look nothing alike (owner,
+    // 2026-10-11: "no diff btwn analog and digital scenes"): Analog is an
+    // oscilloscope / vector screen on a curved, scan-lined phosphor CRT;
+    // Digital is an LED wall with digital rain and LED equaliser bars.
+    analog: { name: "Analog", scenes: ["scope", "spiral", "rings", "lasers", "liquid"], palettes: ["mono"], speed: 0.8, hue: 0, post: 1, flash: 0.6, trails: 1.3 },
+    digital: { name: "Digital", scenes: ["matrix", "eq", "grid", "warp", "tunnel"], palettes: ["neon", "ice", "candy"], speed: 1.1, hue: 0.01, post: 2, flash: 1, trails: 0.3 },
+  };
+  var LS_FLAVOUR_IDS = ["journey", "dreamy", "cosmic", "trippy", "oldschool", "analog", "digital"];
+  // Sliders, 0..1; 0.5 = as the flavour was designed.
+  var LS_SLIDERS = { colour: 0.5, cycle: 0.5, trails: 0.5, energy: 0.5, speed: 0.5, pace: 0.5 };
+
+  function lsOptions(o) {
+    o = o || {};
+    // Flashes are off unless asked for (owner, 2026-10-11).
+    var out = { title: o.title !== false, flashes: o.flashes === true, palette: LS_PALETTES[o.palette] && o.palette !== "mono" ? o.palette : "" };
+    if (o.trails == null && o.depth != null) o = Object.assign({}, o, { trails: o.depth }); // first release called it depth
+    for (var k in LS_SLIDERS) { var v = +o[k]; out[k] = o[k] != null && o[k] !== "" && isFinite(v) ? clamp(v, 0, 1) : LS_SLIDERS[k]; }
+    return out;
+  }
+  // Scene length from the pace slider: 2 min down to 6 s.
+  function lsLife(pace) { return 120 * Math.pow(6 / 120, pace); }
+  // How far ahead of the play position the beat is drawn: one frame plus the
+  // compositor, so the pulse lands when the sound does.
+  var LS_LEAD = 0.05;
+
+  // The track's tempo, a steady beat grid, and drops — from its spectrum.
+  function lsAnalyse(sp, top) {
+    var nb = sp.bands, n = Math.floor(sp.db.length / nb), bs = sp.bucketSeconds, i, j, b;
+    var lo = Math.max(1, Math.round(nb / 4)), floor = top - 36;
+    var flux = new Float32Array(n), low = new Float32Array(n), en = new Float32Array(n), fluxAll = 0;
+    for (i = 0; i < n; i++) {
+      var e = 0, f = 0, fl = 0;
+      for (b = 0; b < nb; b++) {
+        var v = clamp((sp.db[i * nb + b] - floor) / 36, 0, 1);
+        e += v;
+        if (i > 0) {
+          var d = v - clamp((sp.db[(i - 1) * nb + b] - floor) / 36, 0, 1);
+          if (d > 0) { f += d * (b < lo ? 2 : b < nb / 2 ? 1 : 0.6); fluxAll += d; if (b < lo) fl += d; }
+        }
+      }
+      flux[i] = f; low[i] = fl; en[i] = e / nb;
+    }
+    // Onset strength: flux above its 1 s running mean.
+    var on = new Float32Array(n), w = Math.round(0.5 / bs), acc = 0, cnt = 0, a0 = 0, a1 = -1;
+    for (i = 0; i < n; i++) {
+      while (a1 < Math.min(n - 1, i + w)) { a1++; acc += flux[a1]; cnt++; }
+      while (a0 < i - w) { acc -= flux[a0]; a0++; cnt--; }
+      on[i] = Math.max(0, flux[i] - acc / cnt);
+    }
+    // Tempo: autocorrelation over 60-180 bpm, weighted towards 120.
+    var minL = Math.max(2, Math.floor(60 / 180 / bs)), maxL = Math.ceil(60 / 60 / bs), r0 = 0, best = 0, bestL = minL, rs = [];
+    for (i = 0; i < n; i++) r0 += on[i] * on[i];
+    for (var L = minL; L <= maxL; L++) {
+      var s = 0;
+      for (i = L; i < n; i++) s += on[i] * on[i - L];
+      var r = r0 > 0 ? s / r0 : 0, bpm = 60 / (L * bs), wgt = Math.exp(-0.5 * Math.pow(Math.log(bpm / 120) / Math.LN2 / 0.9, 2));
+      rs.push(r);
+      if (r * wgt > best) { best = r * wgt; bestL = L; }
+    }
+    var sorted = rs.slice().sort(function (x, y) { return x - y; }), med = sorted[sorted.length >> 1] || 0, rBest = rs[bestL - minL] || 0, P = bestL;
+    if (bestL > minL && bestL < maxL) {
+      var y0 = rs[bestL - minL - 1], y2 = rs[bestL - minL + 1], den = y0 - 2 * rBest + y2;
+      if (den < 0) P = bestL + 0.5 * (y0 - y2) / den;
+    }
+    // Real music measured 2026-10-11: blues 81 bpm (r 0.51, x17 the median),
+    // funk 92 bpm (r 0.53, x5.8), fado with no drums (r 0.15, x1.6).
+    var steady = rBest > 0.25 && rBest / Math.max(med, 0.02) > 2.5;
+    var beats = [], strength = [], drops = [], down = 0, accents = [], accStr = [];
+    if (steady) {
+      // Beat grid: each beat = its onset + the best beat about one period
+      // earlier, penalised for straying from the period.
+      var score = new Float32Array(n), prev = new Int32Array(n), mo = 0, half = Math.max(1, Math.round(P / 2));
+      for (i = 0; i < n; i++) mo = Math.max(mo, on[i]);
+      var oN = mo > 0 ? 1 / mo : 0;
+      for (i = 0; i < n; i++) {
+        var bestS = 0, bp = -1;
+        for (j = Math.max(0, Math.floor(i - 2 * P)); j <= i - half; j++) {
+          var pen = Math.log((i - j) / P), sc = score[j] - 6 * pen * pen;
+          if (bp < 0 || sc > bestS) { bestS = sc; bp = j; }
+        }
+        score[i] = on[i] * oN + Math.max(0, bestS);
+        prev[i] = bp >= 0 && bestS > 0 ? bp : -1;
+      }
+      var end = Math.max(0, n - 1);
+      for (i = Math.max(0, n - Math.ceil(2 * P)); i < n; i++) if (score[i] > score[end]) end = i;
+      var idx = [];
+      for (i = end; i >= 0; i = prev[i]) { idx.push(i); if (prev[i] < 0) break; }
+      idx.reverse();
+      // Kept within 0.6-1: the grid is steady, so the motion should be too.
+      for (j = 0; j < idx.length; j++) { beats.push((idx[j] + 0.5) * bs); strength.push(clamp(0.6 + on[idx[j]] * oN, 0.6, 1)); }
+      // The downbeat: of the four places in a bar, the one whose beats carry
+      // the most kick drum.
+      var bestD = -1;
+      for (var o = 0; o < 4; o++) {
+        var sd = 0;
+        for (j = o; j < idx.length; j += 4) sd += low[idx[j]] + low[Math.min(n - 1, idx[j] + 1)];
+        if (sd > bestD) { bestD = sd; down = o; }
+      }
+      // Drops (dance music): the next 4 s clearly louder than the 8 s before.
+      var w4 = Math.round(4 / bs), w8 = Math.round(8 / bs), lastDrop = -1e9;
+      for (i = w8; i < n - w4; i += 4) {
+        var pa = 0, pc = 0;
+        for (j = i - w8; j < i; j++) pa += en[j];
+        for (j = i; j < i + w4; j++) pc += en[j];
+        pa /= w8; pc /= w4;
+        if (pc - pa > 0.22 && pa < 0.5 && pc > 0.55 && i * bs - lastDrop > 30) { drops.push(i * bs); lastDrop = i * bs; }
+      }
+    } else {
+      // No steady pulse: the strongest real onsets (a pluck, a chord) become
+      // soft accents, at least 0.4 s apart. No tempo is assumed.
+      var sum2 = 0, sq = 0;
+      for (i = 0; i < n; i++) { sum2 += on[i]; sq += on[i] * on[i]; }
+      var mean = sum2 / Math.max(1, n), sd2 = Math.sqrt(Math.max(0, sq / Math.max(1, n) - mean * mean)), th = mean + 2.5 * sd2, lastA = -1e9, mxA = 0;
+      for (i = 0; i < n; i++) mxA = Math.max(mxA, on[i]);
+      for (i = 1; i < n - 1; i++) {
+        if (on[i] > th && on[i] >= on[i - 1] && on[i] >= on[i + 1] && i * bs - lastA >= 0.4) { accents.push((i + 0.5) * bs); accStr.push(clamp(on[i] / (mxA || 1), 0.3, 1) * 0.6); lastA = i * bs; }
+      }
+    }
+    // How calm or intense the track is, 0..1: how much changes per frame
+    // (mean spectral flux), scaled up a little by the tempo. Measured
+    // 2026-10-11 on the owner's queue: Dustin O'Halloran piano 0, Caetano
+    // bossa 0.04, Los Zafiros 0.10, Antony 0.12, Radiohead "Morning Bell"
+    // 0.23, Senor Coconut 0.46, Tom Middleton "Midnight" 0.78, a Buddha-Bar
+    // track 0.84.
+    var bpmV = steady ? 60 / (P * bs) : 0, fluxMean = n ? fluxAll / n : 0;
+    // Tempo only SCALES how busy the sound is: Paolo Nutini "Alloway Grove"
+    // strums a very regular 109 bpm (pulse 0.73) with little else changing
+    // (flux 0.45), and adding tempo on top rated it 0.31 and ran it too fast
+    // for the song (owner, 2026-10-11). Now 0.12.
+    var intensity = clamp(clamp((fluxMean - 0.35) / 0.75, 0, 1) * (0.7 + 0.3 * (steady ? clamp((bpmV - 65) / 70, 0, 1) : 0.3)), 0, 1);
+    // Per second, how loud this part is within the track (quiet verse 0,
+    // full chorus 1), from the 8 s around it.
+    var secs = Math.max(1, Math.ceil(n * bs)), sec = new Float32Array(secs), sv = [], per = Math.round(1 / bs), half8 = Math.round(4 / bs);
+    for (var sI = 0; sI < secs; sI++) {
+      var c0 = Math.min(n - 1, sI * per), lo8 = Math.max(0, c0 - half8), hi8 = Math.min(n - 1, c0 + half8), sm8 = 0;
+      for (j = lo8; j <= hi8; j++) sm8 += en[j];
+      sec[sI] = sm8 / Math.max(1, hi8 - lo8 + 1); sv.push(sec[sI]);
+    }
+    sv.sort(function (x, y) { return x - y; });
+    var s20 = sv[Math.floor(sv.length * 0.2)] || 0, s90 = sv[Math.floor(sv.length * 0.9)] || 1;
+    for (sI = 0; sI < secs; sI++) sec[sI] = clamp((sec[sI] - s20) / Math.max(0.02, s90 - s20), 0, 1);
+    return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec };
+  }
+
+  // A smooth random walk in 0..1: two slow sines with random rates and phases.
+  function lsWalk(rnd) {
+    return { base: rnd(), target: null, amp: 0.12 + rnd() * 0.2, f1: 0.03 + rnd() * 0.12, f2: 0.07 + rnd() * 0.18, p1: rnd() * TAU, p2: rnd() * TAU };
+  }
+  function lsWalkAt(w, t) { return clamp(w.base + w.amp * (0.6 * Math.sin(w.f1 * t + w.p1) + 0.4 * Math.sin(w.f2 * t + w.p2)), 0, 1); }
+
+  function lsPalette(L, rnd) {
+    var F = LS_FLAVOURS[L.flavour] || LS_FLAVOURS.journey;
+    var id = F.palettes[0] === "mono" ? "mono" : L.opts.palette || F.palettes[Math.floor(rnd() * F.palettes.length) % F.palettes.length];
+    return LS_PALETTES[id] || LS_PALETTES.rainbow;
+  }
+  function lsPickScene(L) {
+    var rnd = L.rnd, F = LS_FLAVOURS[L.flavour] || LS_FLAVOURS.journey, all = F.scenes, i;
+    var pool = all.filter(function (s) { return L.recent.indexOf(s) < 0; });
+    if (!pool.length) pool = all;
+    var wsum = 0, ws = pool.map(function (s) { var dI = (LS_SCENE_INTENSITY[s] - L.mood) / 0.3, w = Math.exp(-dI * dI) + 0.05; wsum += w; return w; });
+    var pick = rnd() * wsum, id = pool[pool.length - 1];
+    for (i = 0; i < pool.length; i++) { pick -= ws[i]; if (pick <= 0) { id = pool[i]; break; } }
+    L.recent.push(id);
+    while (L.recent.length > Math.min(3, all.length - 1)) L.recent.shift();
+    var pal = lsPalette(L, rnd), walks = [], k = [];
+    for (i = 0; i < 8; i++) { walks.push(lsWalk(rnd)); k.push(rnd()); }
+    return {
+      id: id, idx: LS_SCENES.indexOf(id), walks: walks, k: k,
+      c: pal[0].slice(), d: pal[1].slice(), cT: pal[0].slice(), dT: pal[1].slice(), post: F.post,
+      hue: rnd(), hueDir: rnd() < 0.5 ? -1 : 1, fbVar: 0.8 + rnd() * 0.4, zoomVar: 0.6 + rnd() * 0.8,
+      tint: rnd() < 0.6 ? [0.35, 1, 0.45] : [1, 0.68, 0.25],
+      spin: (rnd() - 0.5) * 0.25, time: rnd() * 50, age: 0, life: lsLife(L.opts.pace) * (1.8 - L.mood) * (0.75 + rnd() * 0.5),
+    };
+  }
+
+  function LightShow(flavour, opts) {
+    this.rnd = Math.random;
+    this.opts = lsOptions(opts);
+    this.sm = {};
+    for (var k in LS_SLIDERS) this.sm[k] = this.opts[k];
+    this.flavour = LS_FLAVOURS[flavour] ? flavour : "journey";
+    this.t = 0; this.goS = 0.2; this.mood = 0.3; this.punch = 0; this.surge = 0; this.zoomFlow = 0.3; this.zoomPS = 0.1; this.spinK = 0.3; this.dt = 0;
+    this.env = 0; this.beat = 0; this.kickT = 0; this.kick = 0; this.glow = 0; this.flash = 0; this.flashT = 0;
+    this.bands = new Float32Array(16); this.bass = 0; this.mid = 0; this.treb = 0; this.level = 0;
+    this.recent = []; this.next = null; this.mix = 0; this.mixDur = 4; this.trans = 0;
+    this.lastPos = -1; this.bi = 0; this.di = 0; this.beatCount = 0; this.beatIdx = -1; this.an = null; this.anFor = null;
+    this.titleT = 0; this.titleKey = "";
+    this.cur = lsPickScene(this);
+  }
+  LightShow.prototype.setOptions = function (o) {
+    var was = this.opts;
+    this.opts = lsOptions(o);
+    if (this.opts.pace !== was.pace) this.cur.life = lsLife(this.opts.pace) * (1.8 - this.mood) * (0.75 + this.rnd() * 0.5);
+    // A new colour choice blends into the scenes showing now.
+    if (this.opts.palette !== was.palette) {
+      var self = this;
+      [this.cur, this.next].forEach(function (sc) {
+        if (!sc) return;
+        var p = lsPalette(self, self.rnd);
+        sc.cT = p[0].slice(); sc.dT = p[1].slice();
+      });
+    }
+  };
+  LightShow.prototype.setFlavour = function (f) {
+    f = LS_FLAVOURS[f] ? f : "journey";
+    if (f === this.flavour) return;
+    this.flavour = f; this.recent = [];
+    this.startNext(3);
+  };
+  LightShow.prototype.startNext = function (dur) {
+    if (this.next) { this.cur = this.next; this.next = null; }
+    this.next = lsPickScene(this);
+    this.mix = 0; this.trans = Math.floor(this.rnd() * 3);
+    // 2.5-8 s; calmer energy blends slower.
+    this.mixDur = Math.max(2.5, dur || 0, (3 + this.rnd() * 3) * (1.35 - this.sm.energy * 0.7) * (1.6 - 0.8 * this.mood));
+  };
+  LightShow.prototype.params = function (sc) {
+    var t = this.t * 0.5, out = [];
+    for (var i = 0; i < 8; i++) out.push(lsWalkAt(sc.walks[i], t));
+    return out;
+  };
+  // One frame. R is the renderer: R.S.sp are its spectrum bars (0..1),
+  // R.spec/R.specTop the track's spectrum.
+  LightShow.prototype.update = function (dt, R) {
+    var S = R.S, F = LS_FLAVOURS[this.flavour], rnd = this.rnd, sm = this.sm, i, k;
+    for (k in LS_SLIDERS) sm[k] += (this.opts[k] - sm[k]) * Math.min(1, dt * 3);
+    var EK = sm.energy * 2;
+    var sp = R.spec, playing = S.playing;
+    if (sp !== this.anFor) { this.anFor = sp; this.an = sp ? lsAnalyse(sp, R.specTop) : null; this.lastPos = -1; }
+    // Bands, eased by mood: an intense track's shapes follow every hit (up in
+    // ~60 ms), a calm track's swell and settle (up ~400 ms, down ~1 s) — the
+    // spectrum rings jumping to every strum of a gentle song read as "way
+    // faster than the mood" (owner, 2026-10-11).
+    var mI2 = this.mood * this.mood, upK = 2 + 22 * mI2, downK = 1 + 4 * mI2;
+    var n = S.sp.length;
+    if (this.bands.length !== n) this.bands = new Float32Array(n);
+    var bass = 0, mid = 0, treb = 0, q = Math.max(1, Math.floor(n / 4));
+    for (i = 0; i < n; i++) {
+      var v = playing ? S.sp[i] : 0, cb = this.bands[i];
+      cb += (v - cb) * Math.min(1, dt * (v > cb ? upK : downK));
+      this.bands[i] = cb;
+      if (i < q) bass += cb / q; else if (i < n - q) mid += cb / (n - 2 * q); else treb += cb / q;
+    }
+    this.bass = bass; this.mid = mid; this.treb = treb; this.level = (bass + mid + treb) / 3;
+    // The beat clock. The grid is known ahead, so each pulse starts rising
+    // ~45 ms BEFORE its beat and peaks exactly on it, then falls over ~160 ms:
+    // on time and smooth at once. LS_LEAD covers the frame and compositor.
+    var A = this.an, pos = S.pos + LS_LEAD, hit = 0, downHit = false, drop = false, env = 0, j;
+    // Mood, 0 calm .. 1 intense: the track's own rating, nudged by how loud
+    // this part of it is; eased over ~3 s. No analysis yet: calm-ish.
+    var moodT = 0.3;
+    if (A) moodT = clamp(A.intensity + 0.3 * ((A.sec[Math.min(A.sec.length - 1, Math.max(0, Math.floor(pos)))] || 0) - 0.5), 0, 1);
+    this.mood += (moodT - this.mood) * Math.min(1, dt * 0.35);
+    var I = this.mood;
+    // Calm music: a slow, round swell around each beat. Intense: a short push.
+    var rise = 0.045 + 0.11 * (1 - I), fall = 0.14 + 0.32 * (1 - I);
+    var beats = A ? (A.steady ? A.beats : A.accents) : null, str = A ? (A.steady ? A.strength : A.accStr) : null;
+    if (A && playing && beats.length) {
+      var jump = this.lastPos < 0 || pos < this.lastPos || pos - this.lastPos > 1;
+      if (jump) { this.bi = 0; this.di = 0; }
+      var bi0 = this.bi;
+      while (this.bi < beats.length && beats[this.bi] <= pos) this.bi++;
+      while (this.di < A.drops.length && A.drops[this.di] <= pos) { if (!jump) drop = true; this.di++; }
+      if (!jump && this.bi > bi0) {
+        hit = str[this.bi - 1];
+        this.beatIdx = this.bi - 1;
+        downHit = A.steady && (this.beatIdx - A.down) % 4 === 0;
+      }
+      for (j = Math.max(0, this.bi - 2); j < Math.min(beats.length, this.bi + 2); j++) {
+        var x = pos - beats[j], acc = A.steady ? ((j - A.down) % 4 === 0 ? 1 : 0.72) : 1;
+        env = Math.max(env, str[j] * acc * (x < 0 ? Math.exp(-(x * x) / (rise * rise)) : Math.exp(-x / fall)));
+      }
+      this.lastPos = pos;
+    } else this.lastPos = -1;
+    this.env = env;
+    this.beat = env * EK;
+    var flashK = this.opts.flashes ? F.flash : 0;
+    if (hit) {
+      this.beatCount++;
+      // Re-roll one shape value every 16 / 8 / 4 beats as energy rises.
+      var every = I < 0.4 ? 16 : sm.energy > 0.66 ? 4 : sm.energy > 0.33 ? 8 : 16;
+      if (this.beatCount % every === 0) this.cur.walks[Math.floor(rnd() * 8) % 8].target = rnd();
+      if (flashK > 0 && downHit && I > 0.5 && this.flashT <= 0) { this.flash = Math.max(this.flash, 0.12 * flashK * Math.max(0.5, EK)); this.flashT = 0.4; }
+    }
+    if (drop) {
+      this.kickT = Math.max(this.kickT, 0.02 * Math.max(0.4, EK) * I);
+      if (flashK > 0) { this.flash = Math.max(this.flash, 0.25 * flashK); this.flashT = 0.4; }
+    }
+    this.kickT *= Math.exp(-dt * 4);
+    this.kick += (this.kickT - this.kick) * Math.min(1, dt * 4);
+    this.glow = flashK > 0 ? this.beat * 0.6 * flashK : 0;
+    this.flash *= Math.exp(-dt * 4);
+    this.flashT -= dt;
+    // Travel: the bass and the beat push it (energy decides how hard); with
+    // no steady beat it follows the loudness; paused it barely drifts.
+    // Travel speed follows the mood first (a calm track drifts, an intense
+    // one rushes), then the bass; the beat adds only a little, scaled by mood.
+    var push = 0.3 + sm.energy * 1.4;
+    var go = playing ? 0.1 + 0.75 * I + (A && A.steady ? 0.45 * this.bass : 0.3 * this.level) * I * push : 0.05;
+    this.goS += (go - this.goS) * Math.min(1, dt * 1.5);
+    // The beat shows as a forward glide (the tunnel, stars and scenes move on
+    // a little faster round each beat, eased over ~150 ms) and in the shapes
+    // that follow the music. The CAMERA does not move on the beat: a rock
+    // from side to side and a push in on every beat read as shaking (owner,
+    // 2026-10-11: "some of these just shake and alternate left right").
+    var bk = sm.energy * 2;
+    this.surge += ((playing ? this.env : 0) - this.surge) * Math.min(1, dt * 6);
+    var dT = dt * (this.goS + 0.6 * this.surge * I * I * bk) * F.speed * Math.pow(16, sm.speed - 0.5);
+    // Only a drop moves the camera (a slow push), and Beat strength above
+    // three quarters adds a gentle one per beat for those who want it.
+    this.punch = Math.min(0.06, this.kick + this.env * 0.02 * I * Math.max(0, bk - 1.5) * 2);
+    this.zoomFlow = this.goS / 0.85;
+    // How far the trails drift per SECOND (zoom as a log scale, turn in
+    // radians). It was a fixed step per frame: ~1.5x outward a second at 60 fps
+    // whatever the music, which made a slow ballad rush (owner, 2026-10-11,
+    // Billie Holiday "Some Other Spring": 61 bpm, mood 0.13). Now ~1.1x a
+    // second on a calm track, ~1.4x on an intense one, x(0.3 + trails).
+    var flowN = clamp(this.zoomFlow, 0, 1.3), trl = clamp(sm.trails * F.trails, 0, 1);
+    this.dt = dt;
+    this.zoomPS = (0.02 + 0.45 * flowN) * (0.3 + trl) + this.kick * 8;
+    this.spinK = flowN * (0.5 + trl) * 0.8;
+    this.t += dT;
+    var cyc = (F.hue + 0.004) * Math.pow(sm.cycle * 2, 2) * (0.35 + I), pk = Math.min(1, dt * 1.2);
+    var cs = [this.cur, this.next];
+    for (i = 0; i < 2; i++) {
+      var sc = cs[i];
+      if (!sc) continue;
+      sc.age += dt; sc.time += dT;
+      sc.hue += sc.hueDir * cyc * dt;
+      for (var j = 0; j < 3; j++) { sc.c[j] += (sc.cT[j] - sc.c[j]) * pk; sc.d[j] += (sc.dT[j] - sc.d[j]) * pk; }
+      for (j = 0; j < 8; j++) {
+        var wk = sc.walks[j];
+        if (wk.target != null) { wk.base += (wk.target - wk.base) * Math.min(1, dt * 0.6); if (Math.abs(wk.target - wk.base) < 0.002) wk.target = null; }
+      }
+    }
+    // Scene changes: when time is up, on the next downbeat (or 6 s
+    // later); a drop starts the next scene early. Always a blend.
+    if (this.next) {
+      this.mix += dt / this.mixDur;
+      if (this.mix >= 1) { this.cur = this.next; this.next = null; this.mix = 0; }
+    } else if (drop) this.startNext(2.5);
+    else if (this.cur.age > this.cur.life && (downHit || !(A && A.steady) || !playing || this.cur.age > this.cur.life + 6)) this.startNext();
+    // Title: shown for 8 s on each new track.
+    var tk = R.T.title + "|" + R.T.artist;
+    if (tk !== this.titleKey) { this.titleKey = tk; this.titleT = R.T.title ? 8 : 0; }
+    this.titleT = Math.max(0, this.titleT - dt);
+  };
+
+  // --- WebGL ------------------------------------------------------------------
+  var LS_VERT = "attribute vec2 aP; varying vec2 vUv; void main(){ vUv = aP * 0.5 + 0.5; gl_Position = vec4(aP, 0.0, 1.0); }";
+  // Scene functions take (p, a, b, k, q, t, c, d): a, b = drifting shape
+  // values; k, q = the scene's constants (counts, directions, speeds); t = its
+  // clock; c, d = palette. Counts and speeds must come from k and q only.
+  var LS_FRAG = [
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH",
+    "precision highp float;",
+    "#else",
+    "precision mediump float;",
+    "#endif",
+    "varying vec2 vUv;",
+    // Anti-aliasing: fw(x) = how much x changes across one pixel (0 without
+    // the derivatives extension); lod(x) fades a pattern to its average once
+    // its stripes get finer than a pixel, instead of letting it speckle.
+    "#ifdef LS_DERIV",
+    "float fw(float x){ return fwidth(x); }",
+    "#else",
+    "float fw(float x){ return 0.0; }",
+    "#endif",
+    "float lodw(float w){ return 1.0 - smoothstep(0.25, 0.6, w); }",
+    "float lod(float x){ return lodw(fw(x)); }",
+    "uniform float uPx;",
+    "uniform float uAspect, uBass, uMid, uTreb, uBeat, uGlow, uLevel, uFlash, uMix, uTk, uFb, uZoom, uRot, uPunch;",
+    "uniform float uSA, uSB, uTA, uTB; uniform vec4 uWA0, uWA1, uKA0, uKA1, uWB0, uWB1, uKB0, uKB1; uniform vec3 uCA, uDA, uCB, uDB;",
+    "uniform sampler2D uPrev, uSpec;",
+    "const float TAU = 6.2831853;",
+    "vec3 pal(float t, vec3 c, vec3 d){ return 0.5 + 0.5 * cos(TAU * (c * t + d)); }",
+    "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
+    "float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);",
+    "  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }",
+    "float fbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ v += a * noise(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return v; }",
+    "mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }",
+    "float band(float x){ return texture2D(uSpec, vec2(clamp(x, 0.0, 1.0) * 0.9375 + 0.03125, 0.5)).r; }",
+    // 0 tunnel
+    "vec3 sTunnel(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float sides = floor(3.0 + k.x * 6.0), seg = TAU / sides;",
+    "  float ang = atan(p.y, p.x) + t * (q.z - 0.5) * 0.4, r = length(p);",
+    "  float pr = r * cos(mod(ang + seg * 0.5, seg) - seg * 0.5), rr = max(mix(r, pr, a.y), 0.002);",
+    "  float z = 0.35 / rr + t * (0.6 + k.y * 1.4);",
+    "  float tw = ang / TAU + z * (k.z - 0.5) * 0.25;",
+    "  float fz = z * (0.5 + k.w * 1.5), wz = fw(fz) + 0.02;",
+    "  float st = mix(0.6, smoothstep(-wz, wz, abs(fract(fz) - 0.5) - 0.06 - 0.12 * a.x), lod(fz));",
+    // Angle terms get their pixel width worked out (uPx / r): atan wraps on
+    // the left, and fwidth across the wrap drew a seam there.
+    "  float nr = floor(2.0 + q.x * 10.0), rn = tw * nr;",
+    "  float rays = mix(0.5, 0.5 + 0.5 * cos(TAU * rn), lodw(nr * (uPx / (TAU * max(r, 0.001)) + abs(k.z - 0.5) * 0.25 * fw(z))));",
+    "  float v = mix(st, st * rays, b.z);",
+    "  float zr = z * 0.25, ring = smoothstep(0.08 + fw(zr), 0.0, abs(fract(zr) - 0.5)) * lod(zr);",
+    "  vec3 col = pal(z * 0.05 + 0.15 * b.w * sin(ang * floor(1.0 + q.y * 3.0)) + b.x * 0.3, c, d) * (0.15 + v * 0.95);",
+    "  col += pal(z * 0.05 + 0.5, c, d) * ring * (0.3 + uBass * 0.6 + uGlow);",
+    "  col *= smoothstep(0.0, 0.18, rr);",
+    "  col += pal(0.3, c, d) * exp(-rr * 9.0) * (0.4 + uGlow);",
+    "  return col; }",
+    // 1 hyperspace
+    "vec3 sWarp(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float ang = atan(p.y, p.x), r = length(p); vec3 col = vec3(0.0);",
+    "  for (int L = 0; L < 3; L++){",
+    "    float fl = float(L), cells = 50.0 + fl * 37.0 + floor(k.x * 60.0);",
+    "    float ca = (ang / TAU + 0.5) * cells, id = floor(ca), h = hash(vec2(id, fl * 7.1 + 3.0));",
+    "    float pos = fract(h * 7.3 + t * (0.1 + 0.18 * h) * (1.0 + fl * 0.4) * (0.6 + k.y));",
+    "    float rs = pos * pos * 1.9, len = 0.015 + (0.06 + b.x * 0.25) * pos * pos * (0.5 + uBass + uBeat * 0.4);",
+    "    float da = abs(fract(ca) - 0.5) / cells * TAU * r, w = 0.003 + 0.005 * pos + uPx;",
+    "    float trail = smoothstep(len, 0.0, rs - r) * step(r, rs);",
+    "    col += pal(h + fl * 0.2 + b.y, c, d) * smoothstep(w, 0.0, da) * trail * pos * 2.2 * smoothstep(1.0, 0.85, pos);",
+    "  }",
+    "  col += pal(0.5 + b.z, c, d) * exp(-r * 3.5) * (0.15 + uGlow * 0.4);",
+    "  col += pal(0.8, c, d) * smoothstep(0.6, 1.8, r) * fbm(p * 1.5 + t * 0.05) * 0.15 * b.w;",
+    "  return col; }",
+    // 2 kaleidoscope
+    "vec3 sKaleido(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float n = floor(3.0 + k.x * 9.0), r = length(p), seg = 3.1415927 / n;",
+    "  float ang = atan(p.y, p.x) + t * (k.y - 0.5) * 0.3;",
+    "  ang = mod(ang, 2.0 * seg); ang = abs(ang - seg);",
+    "  vec2 qq = vec2(cos(ang), sin(ang)) * r * (1.2 + a.z * 2.0) + vec2(t * 0.12, t * 0.07);",
+    "  vec2 w = vec2(fbm(qq + t * 0.05), fbm(qq + vec2(5.2, 1.3) - t * 0.045));",
+    "  float f = fbm(qq + (1.5 + b.x * 2.0) * w + uBass * 0.3);",
+    "  float fe = f * (3.0 + b.y * 5.0), e = smoothstep(0.06 + fw(fe), 0.0, abs(fract(fe) - 0.5) - 0.4) * lod(fe);",
+    "  vec3 col = pal(f * 1.4 + r * b.z + a.w, c, d) * (0.2 + f * f * 1.6);",
+    "  col += e * pal(f + 0.33, c, d) * (0.3 + uTreb * 0.6 + uGlow);",
+    "  return col * (1.0 + uGlow * 0.3); }",
+    // 3 kali fractal
+    "vec3 sFractal(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    // Zoomed in with 9 iterations: at 12 and full view its detail was finer
+    // than a pixel and read as noise.
+    "  p = rot(t * (k.x - 0.5) * 0.12) * p; p *= 0.35 + a.y * 0.35;",
+    "  vec2 kk = vec2(0.55 + a.z * 0.15, 0.45 + a.w * 0.15) + 0.02 * vec2(sin(t * 0.21), cos(t * 0.17));",
+    "  vec2 z = abs(p) + 0.001; float acc = 0.0, tr = 10.0;",
+    "  for (int i = 0; i < 9; i++){ z = abs(z) / (dot(z, z) + 0.0004) - kk; acc += exp(-length(z) * (1.5 + b.x * 2.0)); tr = min(tr, abs(z.y)); }",
+    "  vec3 col = pal(acc * 0.12 + b.y + tr, c, d) * clamp(acc * 0.25, 0.0, 1.5);",
+    "  col += pal(acc * 0.1 + 0.5, c, d) * smoothstep(0.03 + fw(tr) * 1.5, 0.0, tr) * lod(tr * 20.0) * (0.3 + uTreb * 0.5 + uGlow);",
+    "  return col; }",
+    // 4 julia
+    "vec3 sJulia(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float dir = k.x > 0.5 ? 1.0 : -1.0, th = t * 0.04 * dir + k.y * TAU + a.y * 0.6;",
+    "  vec2 kk = 0.7885 * vec2(cos(th), sin(th));",
+    "  if (k.z > 0.6) p = abs(p) - vec2(0.3 + b.z * 0.3);",
+    "  float sc = 1.0 + a.z * 0.6;",
+    "  vec2 z = rot(t * 0.03 * dir) * p * sc, dz = vec2(1.0, 0.0);",
+    "  float it = 0.0, m2 = 0.0;",
+    "  for (int i = 0; i < 64; i++){",
+    "    dz = 2.0 * vec2(z.x * dz.x - z.y * dz.y, z.x * dz.y + z.y * dz.x);",
+    "    z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + kk; m2 = dot(z, z);",
+    "    if (m2 > 1024.0) break;",
+    "    if (dot(dz, dz) > 1e20){ it = 64.0; break; }",
+    "    it += 1.0;",
+    "  }",
+    "  if (it > 63.0) return pal(b.x + 0.5, c, d) * (0.04 + uGlow * 0.15);",
+    // Distance to the set, in pixels: dark on the set, a soft halo along it,
+    // the outside shaded smoothly. The plain iteration count speckled.
+    "  float dist = 0.5 * sqrt(m2 / max(dot(dz, dz), 1e-20)) * log(m2) / (uPx * sc);",
+    "  float v = (it - log2(max(log2(m2), 0.0001)) + 4.0) / 64.0;",
+    "  float onSet = smoothstep(0.0, 2.5, dist), halo = exp(-dist / 7.0);",
+    "  vec3 outside = pal(v * 1.5 + b.x, c, d) * smoothstep(0.0, 0.35, v) * 0.9;",
+    "  return (outside + pal(b.x + 0.25, c, d) * halo * (1.1 + uGlow)) * onSet + pal(b.x + 0.5, c, d) * 0.04 * (1.0 - onSet); }",
+    // 5 spiral
+    "vec3 sSpiral(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float r = length(p), ang = atan(p.y, p.x), lr = log(r + 0.001);",
+    "  float arms = floor(1.0 + k.x * 6.0), dir = k.z > 0.5 ? 1.0 : -1.0, tight = 1.5 + q.y * 5.0 + a.y * 0.6;",
+    "  float s = ang * arms / TAU + lr * tight * dir - t * (0.3 + k.w * 0.8);",
+    "  float pw = uPx / max(r, 0.001), ws = pw * (arms / TAU + tight);",
+    "  float v = mix(0.35, pow(0.5 + 0.5 * sin(s * TAU), 1.0 + b.x * 4.0), lodw(ws));",
+    "  float s2 = ang * floor(1.0 + q.x * 4.0) / TAU - lr * tight * 0.7 * dir + t * 0.2;",
+    "  float m = mix(v, v * (1.0 + sin(s2 * TAU) * lodw(pw * (floor(1.0 + q.x * 4.0) / TAU + tight * 0.7))), b.z);",
+    "  vec3 col = pal(lr * 0.25 - t * 0.015 + 0.1 * sin(ang * arms) + b.w, c, d) * m;",
+    "  col += pal(0.6 + b.w, c, d) * exp(-r * 5.0) * (0.3 + uBass * 0.6 + uGlow);",
+    "  return col; }",
+    // 6 liquid
+    "vec3 sLiquid(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  p *= 0.8 + a.x * 1.6;",
+    "  vec2 qq = vec2(fbm(p + t * 0.06), fbm(p + vec2(5.2, 1.3)));",
+    "  vec2 r = vec2(fbm(p + 4.0 * qq + vec2(1.7, 9.2) + t * 0.12), fbm(p + 4.0 * qq + vec2(8.3, 2.8) - t * 0.1));",
+    "  float f = fbm(p + (2.5 + a.y * 3.0 + uBass * 1.2) * r);",
+    "  vec3 col = pal(f * 1.2 + length(qq) * 0.6 + b.x, c, d);",
+    "  return col * (0.2 + f * f * 1.8 + uGlow * 0.25); }",
+    // 7 spectrum rings
+    "vec3 sRings(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  p = rot(t * (k.x - 0.5) * 0.3) * p;",
+    "  float r = length(p), ang = atan(p.y, p.x) / TAU + 0.5;",
+    "  float sym = floor(1.0 + k.y * 3.0), x = fract(ang * sym); x = abs(x * 2.0 - 1.0);",
+    "  float nb = 2.0 * sym * floor(6.0 + q.x * 14.0), cell = fract(ang * nb), xq = (floor(x * nb / sym * 0.5) + 0.5) / (nb / sym * 0.5);",
+    "  float bars = q.y > 0.5 ? 1.0 : 0.0, v = band(mix(x, clamp(xq, 0.0, 1.0), bars));",
+    "  float r0 = 0.22 + a.z * 0.12, top = r0 + v * (0.3 + a.w * 0.3);",
+    "  float gap = mix(1.0, smoothstep(0.0, 0.1, cell) * smoothstep(1.0, 0.9, cell), bars);",
+    "  float fr = (r - r0) * 36.0, seg = q.z > 0.5 ? mix(0.75, smoothstep(0.25 - fw(fr), 0.3 + fw(fr), fract(fr)), lod(fr)) : 1.0;",
+    "  float inBar = smoothstep(r0 - 0.004, r0, r) * smoothstep(top + 0.004, top, r) * gap * seg;",
+    "  vec3 col = pal(x * 0.5 + r * 0.8 + b.w, c, d) * inBar * 1.4;",
+    "  col += pal(b.w + 0.1, c, d) * smoothstep(0.012, 0.0, abs(r - r0 * 0.85)) * (0.4 + uGlow * 1.2);",
+    "  col += pal(b.w + 0.4, c, d) * exp(-r * 7.0) * uBass * 0.6;",
+    "  float e = fract(r * 1.8 - t * 0.4);",
+    "  col += pal(r + b.w, c, d) * smoothstep(0.03, 0.0, abs(e - 0.5)) * 0.12 * (1.0 + uLevel * 1.5);",
+    "  return col; }",
+    // 8 lasers
+    "vec3 sLasers(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  vec3 col = vec3(0.0); float nbeam = 4.0 + floor(k.x * 8.0);",
+    "  for (int s = 0; s < 2; s++){",
+    "    float sg = s == 0 ? 1.0 : -1.0; if (s == 1 && k.y < 0.5) break;",
+    "    vec2 o = vec2((a.x - 0.5) * 0.8 * sg, -1.1 * sg);",
+    "    for (int i = 0; i < 12; i++){",
+    "      float fi = float(i); if (fi >= nbeam) break;",
+    "      float an = 1.5708 * sg + sin(t * (0.2 + 0.25 * hash(vec2(fi, sg + k.z))) + fi * 1.7) * (0.35 + a.z * 0.7);",
+    "      vec2 dir = vec2(cos(an), sin(an)), rel = p - o;",
+    "      float along = dot(rel, dir), dist = abs(rel.x * dir.y - rel.y * dir.x);",
+    "      float on = smoothstep(-0.05, 0.05, along), lv = band(fi / nbeam);",
+    "      col += pal(fi * 0.11 + b.z, c, d) * (smoothstep(0.01 + 0.006 * uBeat, 0.0, dist) * 1.4 + exp(-dist * 30.0) * 0.35) * on * (0.4 + lv * 1.1 + uGlow * 0.5);",
+    "    }",
+    "  }",
+    "  col += pal(0.7 + b.z, c, d) * fbm(p * 2.0 + vec2(t * 0.1, 0.0)) * (0.08 + a.w * 0.12);",
+    "  return col; }",
+    // 9 retro grid
+    "vec3 sGrid(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float hz = -0.08 + (a.x - 0.5) * 0.15; vec3 col = vec3(0.0);",
+    "  col += pal(0.6 + b.x + p.y * 0.2, c, d) * smoothstep(-0.3, 1.2, p.y - hz) * 0.25;",
+    "  vec2 sp = p - vec2((a.y - 0.5) * 0.8, hz + 0.32); float sr = 0.3 + uBass * 0.03;",
+    "  float slats = sp.y < 0.0 ? smoothstep(0.42, 0.48, fract(sp.y * 16.0 - t * 0.4)) : 1.0;",
+    "  col += pal(b.x + 0.05 - sp.y * 0.6, c, d) * smoothstep(sr, sr - 0.01, length(sp)) * slats * 1.3;",
+    "  float ax = abs(p.x) / (uAspect * 1.05), sky = band(ax) * (0.25 + a.z * 0.3);",
+    "  col = mix(col, pal(b.x + 0.75 + ax * 0.3, c, d) * 0.6, 0.85 * smoothstep(hz, hz + 0.005, p.y) * smoothstep(hz + sky + 0.005, hz + sky, p.y));",
+    "  float dy = max(hz - p.y, 0.001), z = 0.35 / dy, x = p.x * z;",
+    "  float zz = z * 0.5 + t * (0.5 + k.x * 1.2), xx = x * 0.5, gz = abs(fract(zz) - 0.5), gx = abs(fract(xx) - 0.5);",
+    "  float ln = max(smoothstep(0.02 * z + fw(xx), 0.0, gx) * lod(xx), smoothstep(0.03 * z + fw(zz), 0.0, gz) * lod(zz));",
+    "  vec3 floorCol = pal(b.x + 0.9, c, d) * 0.06 + pal(b.x + 0.85 + z * 0.02, c, d) * ln * exp(-z * 0.12) * (1.0 + uGlow * 1.2);",
+    "  return mix(col, floorCol, smoothstep(hz + 0.004, hz - 0.004, p.y)); }",
+    // 10 oscilloscope: a Lissajous figure turning slowly, wobbled by the bands, over a graticule
+    "vec3 sScope(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float fa = 1.0 + floor(k.x * 4.0), fb = fa + 1.0 + floor(k.y * 2.0), ph = t * (0.12 + k.z * 0.2);",
+    "  float A = (0.5 + 0.12 * a.x + 0.06 * uBass) * min(uAspect, 1.6), B = 0.62 + 0.1 * a.y + 0.05 * uBass;",
+    "  float dm = 10.0; vec2 pr = vec2(0.0);",
+    "  for (int i = 0; i <= 120; i++){",
+    "    float u = float(i) / 120.0, sv = u * TAU;",
+    "    vec2 cu = vec2(A * sin(fa * sv + ph), B * sin(fb * sv));",
+    "    cu *= 1.0 + 0.12 * (band(u) - 0.35) * (0.5 + b.z);",
+    "    if (i > 0){ vec2 pa = p - pr, ba = cu - pr; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0); dm = min(dm, length(pa - ba * h)); }",
+    "    pr = cu;",
+    "  }",
+    "  float line = smoothstep(0.003 + uPx * 1.5, 0.0, dm), glow = exp(-dm / (0.015 + 0.03 * b.x));",
+    "  vec2 g = abs(fract(p * 2.5 + 0.5) - 0.5) / 2.5, ax = abs(p);",
+    "  float grat = smoothstep(uPx * 1.2, 0.0, min(g.x, g.y)) * 0.07 + smoothstep(uPx * 1.2, 0.0, min(ax.x, ax.y)) * 0.06;",
+    "  return pal(b.y, c, d) * (line * 1.5 + glow * 0.45) + vec3(grat); }",
+    // 11 digital rain: columns of square cells, a bright head falling and a fading trail
+    "vec3 sMatrix(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float cols = 28.0 + floor(k.x * 24.0), cw = 2.0 * uAspect / cols;",
+    "  vec2 cell = floor(vec2((p.x + uAspect) / cw, (1.0 - p.y) / cw)), f = fract(vec2((p.x + uAspect) / cw, (1.0 - p.y) / cw)) - 0.5;",
+    "  float h = hash(vec2(cell.x, 7.0 + floor(k.y * 13.0))), y = (cell.y + 0.5) * cw * 0.5;",
+    "  float head = fract(h * 3.7 + t * (0.18 + h * 0.3) * (0.6 + k.z)) * 1.8 - 0.25, dy = head - y;",
+    "  float trail = dy > 0.0 ? exp(-dy * (3.0 + 5.0 * a.x)) : 0.0, hd = smoothstep(cw, 0.0, abs(dy));",
+    "  float on = step(0.22, hash(cell + vec2(floor(k.w * 50.0), 3.0))), lv = band(cell.x / cols);",
+    "  float sq = smoothstep(0.5, 0.4, max(abs(f.x), abs(f.y))) * smoothstep(1.55, 1.2, head);",
+    "  return pal(b.y + cell.x / cols * 0.2, c, d) * (trail * on * (0.45 + lv) + hd * 1.3) * sq; }",
+    // 12 LED equaliser: straight bars of lit segments, the top segment lit in proportion (no flicker)
+    "vec3 sEq(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  float nb = 16.0 + floor(k.x * 4.0) * 8.0, x = p.x / (2.0 * uAspect) + 0.5;",
+    "  float xx = k.y > 0.5 ? abs(x * 2.0 - 1.0) : x, bi = floor(xx * nb), fx = fract(xx * nb);",
+    "  float v = band((bi + 0.5) / nb) * (0.85 + 0.15 * a.x), yb = k.z > 0.5 ? abs(p.y) : (p.y + 1.0) * 0.5;",
+    "  float segs = 22.0, sy = yb * segs, lit = clamp(v * segs - floor(sy), 0.0, 1.0);",
+    "  float cellm = smoothstep(0.0, 0.14, fract(sy)) * smoothstep(1.0, 0.86, fract(sy)) * smoothstep(0.06, 0.14, fx) * smoothstep(0.94, 0.86, fx);",
+    "  vec3 tone = pal(b.y + yb * 0.45 + bi / nb * 0.15, c, d);",
+    "  return tone * cellm * (lit * 1.35 + 0.05); }",
+    "vec3 scene(float s, vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
+    "  if (s < 0.5) return sTunnel(p, a, b, k, q, t, c, d);",
+    "  if (s < 1.5) return sWarp(p, a, b, k, q, t, c, d);",
+    "  if (s < 2.5) return sKaleido(p, a, b, k, q, t, c, d);",
+    "  if (s < 3.5) return sFractal(p, a, b, k, q, t, c, d);",
+    "  if (s < 4.5) return sJulia(p, a, b, k, q, t, c, d);",
+    "  if (s < 5.5) return sSpiral(p, a, b, k, q, t, c, d);",
+    "  if (s < 6.5) return sLiquid(p, a, b, k, q, t, c, d);",
+    "  if (s < 7.5) return sRings(p, a, b, k, q, t, c, d);",
+    "  if (s < 8.5) return sLasers(p, a, b, k, q, t, c, d);",
+    "  if (s < 9.5) return sGrid(p, a, b, k, q, t, c, d);",
+    "  if (s < 10.5) return sScope(p, a, b, k, q, t, c, d);",
+    "  if (s < 11.5) return sMatrix(p, a, b, k, q, t, c, d);",
+    "  return sEq(p, a, b, k, q, t, c, d); }",
+    "void main(){",
+    // uPunch: a slow push in on a drop (and on the beat only at Beat strength
+    // above three quarters).
+    "  vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0 * (1.0 - uPunch);",
+    "  vec3 col = scene(uSA, p, uWA0, uWA1, uKA0, uKA1, uTA, uCA, uDA);",
+    "  if (uMix > 0.0005){",
+    "    vec3 cb = scene(uSB, p, uWB0, uWB1, uKB0, uKB1, uTB, uCB, uDB); float m = uMix;",
+    "    if (uTk > 0.5 && uTk < 1.5){ float rd = length(p) / (uAspect + 0.2); m = 1.0 - smoothstep(m * 1.6 - 0.5, m * 1.6, rd); }",
+    "    else if (uTk > 1.5){ float nz = fbm(p * 1.5 + 3.0); m = smoothstep(nz - 0.3, nz + 0.3, uMix * 1.6 - 0.3); }",
+    "    col = mix(col, cb, clamp(m, 0.0, 1.0));",
+    "  }",
+    // Feedback: the last frame, zoomed and turned, shows where this one is dark.
+    "  vec2 fp = rot(uRot) * ((vUv - 0.5) * vec2(uAspect, 1.0)) / uZoom;",
+    "  vec2 tc = fp / vec2(uAspect, 1.0) + 0.5;",
+    "  vec2 ed = smoothstep(0.0, 0.03, tc) * smoothstep(1.0, 0.97, tc);",
+    "  vec3 prev = max(texture2D(uPrev, tc).rgb * uFb - 0.01, 0.0) * ed.x * ed.y;",
+    "  float lum = dot(col, vec3(0.3, 0.5, 0.2));",
+    "  col += prev * (1.0 - clamp(lum * 1.4, 0.0, 1.0));",
+    "  col *= 1.0 + uFlash;",
+    "  col = 1.0 - exp(-col * 1.35);",
+    "  gl_FragColor = vec4(col, 1.0);",
+    "}",
+  ].join("\n");
+  // Finishes. 1 Analog: a curved CRT — barrel, rounded corners, phosphor
+  // tint (green or amber), bloom, scan lines. 2 Digital: an LED wall — the
+  // picture sampled into round LEDs with dark gaps, fewer levels, crisp.
+  // 3 soft glow (Dreamy, Cosmic).
+  var LS_BLIT = [
+    "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform float uAspect, uPost, uSat, uBright, uRows; uniform vec3 uTint;",
+    "void main(){",
+    "  vec2 uv = vUv; float mask = 1.0;",
+    "  bool crt = uPost > 0.5 && uPost < 1.5, led = uPost > 1.5 && uPost < 2.5;",
+    "  if (crt){",
+    "    vec2 cc = uv - 0.5; uv = 0.5 + cc * (1.0 + 0.16 * dot(cc, cc));",
+    "    vec2 q = abs(uv - 0.5) - vec2(0.47, 0.46); float rd = length(max(q + 0.04, 0.0)) - 0.04;",
+    "    mask = smoothstep(0.004, -0.004, rd);",
+    "  }",
+    "  vec2 px = vec2(uAspect * uRows, uRows), f = fract(uv * px) - 0.5;",
+    "  if (led) uv = (floor(uv * px) + 0.5) / px;",
+    "  vec3 c = texture2D(uTex, uv).rgb;",
+    "  if (crt || uPost > 2.5){",
+    "    float rad = crt ? 0.006 : 0.014; vec3 g = vec3(0.0);",
+    "    for (int i = 0; i < 8; i++){ float a = float(i) * 0.785398; g += texture2D(uTex, uv + vec2(cos(a) / uAspect, sin(a)) * rad).rgb; }",
+    "    c = c * 0.6 + g * (crt ? 0.07 : 0.08);",
+    "  }",
+    "  float l = dot(c, vec3(0.3, 0.5, 0.2));",
+    "  c = max(mix(vec3(l), c, uSat), 0.0) * uBright;",
+    "  if (crt){",
+    "    c = uTint * l * 1.55 * uBright + c * 0.06;",
+    "    c *= 0.62 + 0.38 * (0.5 + 0.5 * sin(uv.y * 300.0 * 6.2831853));",
+    "    c *= mask;",
+    "  }",
+    "  if (led){",
+    "    c = floor(c * 6.0 + 0.5) / 6.0;",
+    "    c *= smoothstep(0.5, 0.34, length(f)) * 1.35;",
+    "  }",
+    "  vec2 v = (vUv - 0.5) * vec2(uAspect, 1.0); c *= 1.0 - (led ? 0.12 : crt ? 0.5 : 0.35) * dot(v, v);",
+    "  gl_FragColor = vec4(c, 1.0); }",
+  ].join("\n");
+  var LS_COPY = "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }";
+
+  function lsCompile(gl, vs, fs) {
+    function sh(type, src) {
+      var s = gl.createShader(type);
+      if (!s) return null;
+      gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { gl.deleteShader(s); return null; }
+      return s;
+    }
+    var v = sh(gl.VERTEX_SHADER, vs), f = sh(gl.FRAGMENT_SHADER, fs);
+    if (!v || !f) return null;
+    var p = gl.createProgram();
+    gl.attachShader(p, v); gl.attachShader(p, f); gl.bindAttribLocation(p, 0, "aP"); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return null;
+    var u = {}, nu = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;
+    for (var i = 0; i < nu; i++) { var info = gl.getActiveUniform(p, i); if (info) u[info.name] = gl.getUniformLocation(p, info.name); }
+    return { p: p, u: u };
+  }
+
+  // Returns null where WebGL is missing or the shaders do not compile.
+  function lsGl() {
+    var cv = makeCanvas(2, 2), gl = null;
+    if (!cv || typeof cv.getContext !== "function") return null;
+    try { gl = cv.getContext("webgl", { alpha: false, antialias: false, depth: false, preserveDrawingBuffer: false, powerPreference: "high-performance" }) || cv.getContext("experimental-webgl"); } catch (e) { gl = null; }
+    if (!gl || typeof gl.createShader !== "function" || typeof gl.getShaderParameter !== "function" || !gl.FRAGMENT_SHADER) return null;
+    var deriv = false;
+    try { deriv = !!gl.getExtension("OES_standard_derivatives"); } catch (e) { deriv = false; }
+    var main = lsCompile(gl, LS_VERT, (deriv ? "#extension GL_OES_standard_derivatives : enable\n#define LS_DERIV 1\n" : "") + LS_FRAG), blit = lsCompile(gl, LS_VERT, LS_BLIT), copy = lsCompile(gl, LS_VERT, LS_COPY);
+    if (!main || !blit || !copy) return null;
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    var G = { cv: cv, gl: gl, main: main, blit: blit, copy: copy, spec: lsTex(gl), fb: [null, null], tx: [null, null], w: 0, h: 0, cur: 0, lost: false, specBuf: new Uint8Array(16) };
+    if (typeof cv.addEventListener === "function") {
+      cv.addEventListener("webglcontextlost", function (e) { G.lost = true; if (e && e.preventDefault) e.preventDefault(); });
+    }
+    return G;
+  }
+  function lsTex(gl) {
+    var t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  // New feedback buffers at w x h. The trails so far are copied across, so a
+  // resize (window, or the adaptive render size) does not blank the picture.
+  function lsGlSize(G, w, h) {
+    if (G.w === w && G.h === h) return;
+    var gl = G.gl, tx = [lsTex(gl), lsTex(gl)], fb = [gl.createFramebuffer(), gl.createFramebuffer()];
+    for (var i = 0; i < 2; i++) {
+      gl.bindTexture(gl.TEXTURE_2D, tx[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb[i]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tx[i], 0);
+      gl.viewport(0, 0, w, h);
+      gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    if (G.w > 0 && G.tx[G.cur]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb[G.cur]);
+      gl.useProgram(G.copy.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, G.tx[G.cur]);
+      gl.uniform1i(G.copy.u.uTex, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    for (i = 0; i < 2; i++) { if (G.tx[i]) gl.deleteTexture(G.tx[i]); if (G.fb[i]) gl.deleteFramebuffer(G.fb[i]); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    G.tx = tx; G.fb = fb; G.cv.width = w; G.cv.height = h; G.w = w; G.h = h;
+  }
+  function lsSceneUniforms(gl, u, L, sc, x) {
+    var p = L.params(sc), k = sc.k, hue = sc.post === 1 ? 0 : sc.hue;
+    gl.uniform1f(u["uS" + x], sc.idx);
+    gl.uniform1f(u["uT" + x], sc.time % 2000);
+    gl.uniform4f(u["uW" + x + "0"], p[0], p[1], p[2], p[3]);
+    gl.uniform4f(u["uW" + x + "1"], p[4], p[5], p[6], p[7]);
+    gl.uniform4f(u["uK" + x + "0"], k[0], k[1], k[2], k[3]);
+    gl.uniform4f(u["uK" + x + "1"], k[4], k[5], k[6], k[7]);
+    gl.uniform3f(u["uC" + x], sc.c[0], sc.c[1], sc.c[2]);
+    gl.uniform3f(u["uD" + x], sc.d[0] + hue, sc.d[1] + hue, sc.d[2] + hue);
+  }
+  function lsGlDraw(G, L, w, h) {
+    var gl = G.gl, u = G.main.u, src = G.cur, dst = 1 - src, F = LS_FLAVOURS[L.flavour], sm = L.sm;
+    lsGlSize(G, w, h);
+    // The bands as a 1-row texture: the shader reads it interpolated.
+    var n = L.bands.length;
+    if (G.specBuf.length !== n) G.specBuf = new Uint8Array(n);
+    for (var i = 0; i < n; i++) G.specBuf[i] = Math.round(clamp(L.bands[i], 0, 1) * 255);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, G.spec);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, n, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, G.specBuf);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, G.tx[src]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, G.fb[dst]);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(G.main.p);
+    gl.uniform1i(u.uPrev, 0); gl.uniform1i(u.uSpec, 1);
+    gl.uniform1f(u.uAspect, w / h);
+    gl.uniform1f(u.uBass, L.bass); gl.uniform1f(u.uMid, L.mid); gl.uniform1f(u.uTreb, L.treb);
+    gl.uniform1f(u.uBeat, L.beat); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level); gl.uniform1f(u.uFlash, L.flash);
+    gl.uniform1f(u.uPunch, L.punch);
+    gl.uniform1f(u.uPx, 2 / h);
+    var nx = L.next || L.cur, m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
+    lsSceneUniforms(gl, u, L, L.cur, "A");
+    lsSceneUniforms(gl, u, L, nx, "B");
+    gl.uniform1f(u.uMix, m); gl.uniform1f(u.uTk, L.trans);
+    // Trails slider: 0 = none, 1 = long trails that tunnel into themselves.
+    var tr = clamp(sm.trails * F.trails, 0, 1), fbVar = L.cur.fbVar * (1 - m) + nx.fbVar * m, zVar = L.cur.zoomVar * (1 - m) + nx.zoomVar * m;
+    gl.uniform1f(u.uFb, Math.min(0.95, 0.94 * Math.pow(tr, 0.8) * fbVar));
+    // The trails flow at the travel speed: a calm track's trails drift.
+    var fdt = Math.min(0.1, L.dt || 1 / 60);
+    gl.uniform1f(u.uZoom, Math.exp(L.zoomPS * zVar * fdt));
+    gl.uniform1f(u.uRot, (L.cur.spin * (1 - m) + nx.spin * m) * L.spinK * fdt);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // To the visible canvas: the flavour's finish, colour and brightness.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(G.blit.p);
+    gl.bindTexture(gl.TEXTURE_2D, G.tx[dst]);
+    gl.uniform1i(G.blit.u.uTex, 0);
+    gl.uniform1f(G.blit.u.uAspect, w / h);
+    var fin = m > 0.5 ? nx : L.cur;
+    gl.uniform1f(G.blit.u.uPost, fin.post);
+    // LED rows: ~120 on a big screen, never smaller than 7 device pixels each.
+    gl.uniform1f(G.blit.u.uRows, Math.min(120, Math.max(40, h / 7)));
+    // Tint blended across the scene change, so green and amber never swap in a frame.
+    gl.uniform3f(G.blit.u.uTint, L.cur.tint[0] * (1 - m) + nx.tint[0] * m, L.cur.tint[1] * (1 - m) + nx.tint[1] * m, L.cur.tint[2] * (1 - m) + nx.tint[2] * m);
+    // Colour slider: 0 grey, 0.5 natural, 1 vivid and a little brighter.
+    gl.uniform1f(G.blit.u.uSat, sm.colour < 0.5 ? sm.colour * 2 : 1 + (sm.colour - 0.5) * 2.4);
+    gl.uniform1f(G.blit.u.uBright, 1 + Math.max(0, sm.colour - 0.5) * 0.5);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    G.cur = dst;
+  }
+
+  // --- 2D fallback -------------------------------------------------------------
+  function lsHsl(h, s, l, a) { return "hsla(" + Math.round(((h % 1) + 1) % 1 * 360) + "," + Math.round(s) + "%," + Math.round(l) + "%," + (a == null ? 1 : Math.round(a * 1000) / 1000) + ")"; }
+  function ls2dDraw(R, w, h) {
+    var L = R.ls, F = R.ls2d;
+    if (!F || F.w !== w || F.h !== h) {
+      var cv = makeCanvas(w, h), fc = null;
+      try { fc = cv && cv.getContext("2d"); } catch (e) { fc = null; }
+      F = R.ls2d = fc ? { cv: cv, c: fc, w: w, h: h } : null;
+      if (!F) return;
+      fc.fillStyle = "#000"; fc.fillRect(0, 0, w, h);
+    }
+    var f = F.c, cx = w / 2, cy = h / 2, sc = Math.min(w, h) / 2, bands = L.bands, n = bands.length, k = L.cur.k;
+    var fdt2 = Math.min(0.1, L.dt || 1 / 60), z = Math.exp(L.zoomPS * fdt2);
+    f.save();
+    f.globalAlpha = 0.5 + L.sm.trails * 0.42;
+    f.translate(cx, cy); f.rotate(L.cur.spin * L.spinK * fdt2); f.scale(z, z);
+    f.drawImage(F.cv, -cx, -cy, w, h);
+    f.restore();
+    f.globalAlpha = 1;
+    f.fillStyle = "rgba(0,0,0,0.08)"; f.fillRect(0, 0, w, h);
+    var p = L.params(L.cur), sym = 2 + Math.floor(k[0] * 6), r0 = sc * (0.15 + p[1] * 0.2) * (1 + L.beat * 0.05), hue = L.cur.hue;
+    f.save(); f.translate(cx, cy); f.rotate(L.cur.time * (k[1] - 0.5) * 0.6);
+    f.beginPath();
+    var steps = n * sym * 2;
+    for (var i = 0; i <= steps; i++) {
+      var j = i % (n * 2), bi = j < n ? j : 2 * n - 1 - j, a = (i / steps) * TAU, rr = r0 + bands[bi] * sc * (0.35 + p[3] * 0.3);
+      if (i) f.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); else f.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    f.closePath();
+    f.lineWidth = 2 + L.beat * 3; f.strokeStyle = lsHsl(hue, 90 * Math.min(1, L.sm.colour * 2), 60, 0.9); f.stroke();
+    f.fillStyle = lsHsl(hue + 0.5, 80, 50, 0.12 + L.glow * 0.2); f.fill();
+    f.beginPath(); f.arc(0, 0, Math.max(1, r0 * 0.6), 0, TAU); f.fillStyle = lsHsl(hue + 0.25, 90, 55, 0.25 + L.glow * 0.4); f.fill();
+    f.restore();
+    if (L.flash > 0.01) { f.fillStyle = "rgba(255,255,255," + (Math.round(L.flash * 0.5 * 1000) / 1000) + ")"; f.fillRect(0, 0, w, h); }
+  }
+
+  IMPL.lightshow = {
+    bg: "#000000",
+    full: true,
+    // Paused it barely drifts, so 4 fps is enough (as the other views settle).
+    cadence: function (R) { return R.S.playing ? 0 : 250; },
+    stat: function (c) { c.fillStyle = "#000"; c.fillRect(0, 0, W, H); },
+    // Full-bleed, in device pixels: the WebGL picture, rendered at up to 1080
+    // lines (full size; at 67 % fractal edges turned to speckle, owner
+    // 2026-10-11). The render size follows the frame rate: down when frames
+    // run slow, back up when there is room.
+    drawFull: function (c, R, b) {
+      var L = R.ls || (R.ls = new LightShow(R.variant, R.lsOpts));
+      L.setFlavour(R.variant);
+      L.update(R.dt || 0, R);
+      if (R.lsGl === undefined) R.lsGl = lsGl();
+      var G = R.lsGl;
+      if (G && G.lost) G = R.lsGl = null;
+      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, 1080) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
+      c.fillStyle = "#000"; c.fillRect(0, 0, b.bw, b.bh);
+      if (G) {
+        try { lsGlDraw(G, L, rw, rh); c.imageSmoothingEnabled = true; c.drawImage(G.cv, 0, 0, b.bw, b.bh); }
+        catch (e) { R.lsGl = null; }
+      } else {
+        ls2dDraw(R, Math.max(2, Math.round(rw / 2)), Math.max(2, Math.round(rh / 2)));
+        if (R.ls2d) c.drawImage(R.ls2d.cv, 0, 0, b.bw, b.bh);
+      }
+      var dt = R.dt || 0;
+      if (dt > 0 && R.S.playing) {
+        R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
+        if (R.lsFt > 2) {
+          var fps = R.lsFn / R.lsFt, cur = R.lsQ || 1;
+          if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(0.4, cur * 0.85); R.lsUp = 0; }
+          else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
+          else R.lsUp = 0;
+          R.lsFt = 0; R.lsFn = 0;
+        }
+      }
+    },
+    dyn: function (c, S, T, v, R) {
+      var L = R.ls;
+      if (!L || !L.opts.title || !(L.titleT > 0) || !T.title) return;
+      var a = Math.min(1, L.titleT / 1.5, (8 - L.titleT) / 0.8);
+      if (!(a > 0)) return;
+      c.globalAlpha = a;
+      c.textAlign = "left"; c.textBaseline = "alphabetic";
+      c.shadowColor = "rgba(0,0,0,0.8)"; c.shadowBlur = 12 * (R.box.lw / W);
+      c.fillStyle = "#ffffff";
+      c.fillText(fit(c, 700, 46, SANS, T.title, 1200, 0.6), 80, 800);
+      if (T.artist) { c.fillStyle = "rgba(255,255,255,0.75)"; c.fillText(fit(c, 500, 30, SANS, T.artist, 1200, 0.6), 80, 845); }
+      c.shadowBlur = 0; c.globalAlpha = 1;
+    },
+  };
+
+  // ---------------------------------------------------------------------------
   // Lyrics. Synced (LRC) lyrics scroll with the interpolated position; plain
   // lyrics auto-scroll with progress; otherwise "Instrumental" or "No lyrics".
   function parseLrc(text) {
@@ -2366,6 +3290,12 @@
     this.lyr = L; this.lyrCache = {}; this.S.lyScroll = null;
     this._wake();
   };
+  // Light show options (energy, palette, pace, scenes, title, flashes); see lsOptions.
+  P.setOptions = function (o) {
+    this.lsOpts = o || null;
+    if (this.ls) this.ls.setOptions(this.lsOpts);
+    this._wake();
+  };
   P.setClockFormat = function (f) { this.clockFmt = f === "12" || f === "24" ? f : "auto"; this._wake(); };
   P.setSpectrum = function (sp) {
     this.spec = sp && sp.db && sp.bands > 0 && sp.bucketSeconds > 0 ? sp : null;
@@ -2407,6 +3337,8 @@
     if (doc && doc.fonts && typeof doc.fonts.removeEventListener === "function") doc.fonts.removeEventListener("loadingdone", this._onFonts);
     if (this.artImg) { this.artImg.onload = this.artImg.onerror = null; }
     this.layer = this.label = this.arm = this.art = this.artImg = null; this.grads = {}; this.grain = null;
+    if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
+    this.lsGl = null; this.ls2d = null;
   };
 
   // The cover on screen stays until its replacement has LOADED. Hosts get
@@ -2470,7 +3402,7 @@
     if (this.lastFrame && t - this.lastFrame < 1000 / this.maxFps - 2) { this._wake(); return; }
     this.lastFrame = t;
     var dt = this.lastT ? Math.min(0.25, Math.max(0, (t - this.lastT) / 1000)) : 0;
-    this.lastT = t;
+    this.lastT = t; this.dt = dt;
     if (this.needSize) this._measure();
     var dpos = this._advance(dt, t);
     var settled = this._physics(dt, dpos);
@@ -2761,6 +3693,14 @@
     var V = IMPL[this.view];
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.globalAlpha = 1;
+    this.frames = (this.frames || 0) + 1;
+    if (V.full) {
+      // Full-bleed views draw the whole bitmap, then overlay in the 16:9 box.
+      c.save(); V.drawFull(c, this, b); c.restore();
+      c.setTransform(b.lw / W, 0, 0, b.lh / H, b.ox, b.oy);
+      c.save(); V.dyn(c, this.S, this.T, this.variant, this); c.restore();
+      return;
+    }
     c.fillStyle = V.bgFor ? V.bgFor(this.variant) : V.bg;
     if (b.ox > 0) { c.fillRect(0, 0, b.ox, b.bh); c.fillRect(b.ox + b.lw, 0, b.bw - b.ox - b.lw, b.bh); }
     if (b.oy > 0) { c.fillRect(0, 0, b.bw, b.oy); c.fillRect(0, b.oy + b.lh, b.bw, b.bh - b.oy - b.lh); }
@@ -2778,7 +3718,8 @@
   };
 
   // Variant lists live beside their drawing code; copy them into VIEWS.
-  [["turntable", TT_VARIANTS], ["cassette", CAS_VARIANTS], ["meters", METER_VARIANTS], ["spectrum", SPEC_VARIANTS], ["lyrics", LYR_VARIANTS], ["clock", CLOCK_VARIANTS]].forEach(function (e) {
+  var LS_VARIANTS = LS_FLAVOUR_IDS.map(function (id) { return [id, LS_FLAVOURS[id].name]; });
+  [["lightshow", LS_VARIANTS], ["turntable", TT_VARIANTS], ["cassette", CAS_VARIANTS], ["meters", METER_VARIANTS], ["spectrum", SPEC_VARIANTS], ["lyrics", LYR_VARIANTS], ["clock", CLOCK_VARIANTS]].forEach(function (e) {
     VIEWS.filter(function (v) { return v.id === e[0]; })[0].variants = e[1].map(function (m) { return { id: m[0], name: m[1] }; });
   });
 
