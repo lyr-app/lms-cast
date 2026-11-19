@@ -2787,6 +2787,9 @@
     "  gl_FragColor = vec4(c, 1.0); }",
   ].join("\n");
   var LS_COPY = "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex, vUv); }";
+  // The one-pass path's crossfade: a still of the outgoing scene, drifting
+  // slowly forward as it fades (uZoom), over the incoming scene.
+  var LS_SNAP = "precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform float uZoom; void main(){ gl_FragColor = texture2D(uTex, (vUv - 0.5) / uZoom + 0.5); }";
 
   // Why the light show is or is not on WebGL, for the receiver's diagnostics
   // (LyrDisplays.glStatus()): a weak Chromecast fell back to the 2D drawing
@@ -2848,7 +2851,8 @@
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    var G = { cv: cv, gl: gl, comp: comp, blit: blit, copy: copy, deriv: deriv, weak: weak, scenes: [], spec: lsTex(gl), fb: [null, null], tx: [null, null], sfb: [null, null], stx: [null, null], w: 0, h: 0, cur: 0, lost: false, specBuf: new Uint8Array(16) };
+    var snap = lsCompile(gl, LS_VERT, LS_SNAP, "snap"); // optional: without it the fade draws both scenes
+    var G = { cv: cv, gl: gl, comp: comp, blit: blit, copy: copy, snap: snap, snapTx: null, snapFb: null, snapFor: null, deriv: deriv, weak: weak, scenes: [], spec: lsTex(gl), fb: [null, null], tx: [null, null], sfb: [null, null], stx: [null, null], w: 0, h: 0, cur: 0, lost: false, specBuf: new Uint8Array(16) };
     if (typeof cv.addEventListener === "function") {
       cv.addEventListener("webglcontextlost", function (e) { G.lost = true; if (e && e.preventDefault) e.preventDefault(); });
     }
@@ -2906,9 +2910,11 @@
     G.scenes[i] = pr || false;
     return G.scenes[i];
   }
+  // slot: -1 the screen, 0/1 the scene buffers, -2 the snapshot (-1 and -2
+  // are tone-mapped, as on screen).
   function lsDrawScene(G, L, sc, pr, slot, w, h) {
     var gl = G.gl, u = pr.u, ps = L.params(sc), k = sc.k, hue = sc.post === 1 ? 0 : sc.hue;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, slot < 0 ? null : G.sfb[slot]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, slot === -2 ? G.snapFb : slot < 0 ? null : G.sfb[slot]);
     gl.viewport(0, 0, w, h);
     gl.useProgram(pr.p);
     gl.uniform1i(u.uSpec, 1);
@@ -2944,6 +2950,28 @@
     gl.activeTexture(gl.TEXTURE0);
     var m = L.next ? lsEase(L.mix) : 0;
     gl.disable(gl.BLEND);
+    // A fade drew BOTH scenes every frame, twice the cost for the 8-14 s of
+    // it: measured on the living room's Chromecast (Mali-G31, 2026-11-19),
+    // 3-8 % late frames on one scene, 37-45 % during the fade. So the
+    // outgoing scene is drawn ONCE into a still, and the fade lays that still
+    // (drifting slowly forward) over the incoming scene.
+    if (L.next && G.snap && lsSnapshot(G, L, w, h)) {
+      lsDrawScene(G, L, L.next, G.scenes[L.next.idx], -1, w, h);
+      if (m < 0.9995) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, w, h);
+        gl.useProgram(G.snap.p);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, G.snapTx);
+        gl.uniform1i(G.snap.u.uTex, 0);
+        gl.uniform1f(G.snap.u.uZoom, 1 + 0.08 * m);
+        gl.enable(gl.BLEND);
+        gl.blendColor(0, 0, 0, 1 - m);
+        gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.disable(gl.BLEND);
+      }
+      return true;
+    }
     lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], -1, w, h);
     if (L.next && m > 0.0005) {
       gl.enable(gl.BLEND);
@@ -2953,6 +2981,27 @@
       gl.disable(gl.BLEND);
     }
     return true;
+  }
+  // The still of the outgoing scene, taken once when a fade starts (L.next is
+  // a new object each fade). False when it cannot be made: draw both instead.
+  function lsSnapshot(G, L, w, h) {
+    if (G.snapFor === L.next) return true;
+    var gl = G.gl;
+    try {
+      if (!G.snapTx) { G.snapTx = lsTex(gl); G.snapFb = gl.createFramebuffer(); G.snapW = 0; G.snapH = 0; }
+      if (G.snapW !== w || G.snapH !== h) {
+        gl.bindTexture(gl.TEXTURE_2D, G.snapTx);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, G.snapFb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, G.snapTx, 0);
+        if (gl.checkFramebufferStatus && gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { G.snap = null; return false; }
+        G.snapW = w; G.snapH = h;
+      }
+      lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], -2, w, h);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      G.snapFor = L.next;
+      return true;
+    } catch (e) { G.snap = null; return false; }
   }
   // Returns false when no scene of this flavour works on this GPU (the caller
   // falls back to the 2D drawing).
@@ -3122,6 +3171,11 @@
   //   on such a chip one pass costs a fraction of four;
   //   lean and at the floor and still late: pace at a slower even rate.
   // - under 2 % late for three windows, and no scene blend running: grow 6 %.
+  // - at the smallest size and slowest pace, a scene still late in a window
+  //   with no fade is too heavy for this GPU: it is skipped from then on, on
+  //   this device (remembered per GPU in localStorage). Measured 2026-11-19 on
+  //   the Mali-G31: liquid 7.6-8.4 fps (100 % late), warp 11-31 % late,
+  //   lasers 59-71 %, while fractal and eq ran at an even 20.
   // `exp.q` still pins the size for device experiments.
   function lsPace(R, L, G, X, b, rh) {
     var dt = R.dt || 0;
@@ -3129,7 +3183,9 @@
     var frameS = 1 / Math.max(1, R.maxFps);
     R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
     if (dt > frameS * 1.25) R.lsLate = (R.lsLate || 0) + 1;
+    if (L.next) R.lsFade = true;
     if (R.lsFt <= 2) return;
+    var faded = !!R.lsFade; R.lsFade = false;
     var fps = R.lsFn / R.lsFt, late = (R.lsLate || 0) / R.lsFn, cur = R.lsQ || 1, lean = !!(G && G.lean);
     R.lsFt = 0; R.lsFn = 0; R.lsLate = 0;
     R.lsWin = (R.lsWin || 0) + 1;
@@ -3143,7 +3199,8 @@
       R.lsUp = 0;
       if (G && !G.weak && !lean && cur <= 0.8 && !(X.direct === false)) { G.lean = true; R.lsQ = 1; R.lsCeil = 0; return; }
       if (cur > floor + 0.001) { R.lsCeil = cur; R.lsCeilW = R.lsWin; R.lsQ = Math.max(floor, cur * 0.88); return; }
-      if (R.maxFps > 20) { if (!R.lsFpsBase) R.lsFpsBase = R.maxFps; R.maxFps = R.maxFps >= 50 ? 30 : 20; R.lsQ = 1; R.lsCeil = 0; }
+      if (R.maxFps > 20) { if (!R.lsFpsBase) R.lsFpsBase = R.maxFps; R.maxFps = R.maxFps >= 50 ? 30 : 20; R.lsQ = 1; R.lsCeil = 0; return; }
+      if (late > 0.25 && !faded && G && (G.weak || lean)) lsDropHeavy(L);
       return;
     }
     if (late < 0.02 && cur < 1 && !L.next) {
@@ -3153,6 +3210,29 @@
       return;
     }
     R.lsUp = 0;
+  }
+
+  // Skip the scene showing now on this device, if the flavour keeps at least
+  // two others; starts the next one at once.
+  var LS_HEAVY_KEY = "lyr.lightshow.heavy";
+  function lsHeavyStore(read, list) {
+    try {
+      var ls = root.localStorage, key = LS_HEAVY_KEY + "|" + (LS_GL_STATUS.renderer || "?");
+      if (!ls) return [];
+      if (read) { var v = JSON.parse(ls.getItem(key) || "[]"); return Array.isArray(v) ? v.filter(function (x) { return LS_SCENES.indexOf(x) >= 0; }) : []; }
+      ls.setItem(key, JSON.stringify(list));
+    } catch (e) {}
+    return [];
+  }
+  function lsDropHeavy(L) {
+    var F = LS_FLAVOURS[L.flavour] || LS_FLAVOURS.journey, id = L.cur.id;
+    var left = F.scenes.filter(function (x) { return x !== id && !L.unsupported[x]; });
+    if (left.length < 2) return;
+    L.unsupported[id] = true;
+    var heavy = Object.keys(L.unsupported).filter(function (x) { return L.unsupported[x] === true && LS_SCENES.indexOf(x) >= 0; });
+    LS_GL_STATUS.tooHeavy = heavy;
+    if (!(LS_GL_STATUS.weak)) lsHeavyStore(false, heavy);
+    if (!L.next) L.startNext();
   }
 
   IMPL.lightshow = {
@@ -3174,6 +3254,12 @@
       L.update(R.dt || 0, R);
       if (R.lsGl === undefined) R.lsGl = lsGl();
       var G = R.lsGl;
+      // Scenes this device measured too heavy before: skipped from the start.
+      if (G && !R.lsHeavyRead) {
+        R.lsHeavyRead = true;
+        var hv = lsHeavyStore(true);
+        if (hv.length) { hv.forEach(function (x) { L.unsupported[x] = true; }); LS_GL_STATUS.tooHeavy = hv; if (L.unsupported[L.cur.id]) L.replaceCurrent(); }
+      }
       if (G && G.lost) G = R.lsGl = null;
       // Memory: the GL side holds three buffers of this size (two for the
       // trails, one to show), 4 bytes a pixel — ~25 MB at 1920 x 1080. Capped
@@ -3694,7 +3780,7 @@
     lsDomDetach(this);
     if (this.lsFpsBase) { this.maxFps = this.lsFpsBase; this.lsFpsBase = 0; }
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
-    this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0; this.lsCeil = 0; this.lsUp = 0; this.lsLate = 0; this.lsFt = 0; this.lsFn = 0;
+    this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0; this.lsHeavyRead = false; this.lsCeil = 0; this.lsUp = 0; this.lsLate = 0; this.lsFt = 0; this.lsFn = 0;
   };
   P.destroy = function () {
     this.dead = true;
