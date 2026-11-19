@@ -2102,7 +2102,12 @@
     }
     // Real music measured 2026-10-11: blues 81 bpm (r 0.51, x17 the median),
     // funk 92 bpm (r 0.53, x5.8), fado with no drums (r 0.15, x1.6).
-    var steady = rBest > 0.25 && rBest / Math.max(med, 0.02) > 2.5;
+    // A busy band track spreads its onsets, so every lag correlates a little
+    // and the ratio to the median falls: The Smiths "This Charming Man"
+    // (2026-11-19) reads pulse 0.36 at 102 bpm but only 2.3x the median, and
+    // was treated as having no beat at all (snail's pace, off the beat). A
+    // clear pulse (> 0.3) now needs only 2x; the fado stays out (0.15, 1.6x).
+    var ratioR = rBest / Math.max(med, 0.02), steady = (rBest > 0.25 && ratioR > 2.5) || (rBest > 0.3 && ratioR > 2);
     var beats = [], strength = [], drops = [], down = 0, accents = [], accStr = [];
     if (steady) {
       // Beat grid: each beat = its onset + the best beat about one period
