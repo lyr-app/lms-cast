@@ -2315,7 +2315,7 @@
     for (k in LS_SLIDERS) sm[k] += (this.opts[k] - sm[k]) * Math.min(1, dt * 3);
     var EK = sm.energy * 2;
     var sp = R.spec, playing = S.playing;
-    if (sp !== this.anFor) { this.anFor = sp; this.an = sp ? lsAnalyse(sp, R.specTop) : null; this.lastPos = -1; }
+    if (sp !== this.anFor) { this.anFor = sp; this.an = sp ? lsAnalyse(sp, R.specTop) : null; this.lastPos = -1; this.anFresh = true; }
     // Bands, eased by mood: an intense track's shapes follow every hit (up in
     // ~60 ms), a calm track's swell and settle (up ~400 ms, down ~1 s) — the
     // spectrum rings jumping to every strum of a gentle song read as "way
@@ -3188,7 +3188,9 @@
     var frameS = 1 / Math.max(1, R.maxFps);
     R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
     if (dt > frameS * 1.25) R.lsLate = (R.lsLate || 0) + 1;
-    if (L.next) R.lsFade = true;
+    // A fade, or the track analysis that runs on a new track, slows frames
+    // through no fault of the scene: such a window never counts against it.
+    if (L.next || L.anFresh) { R.lsFade = true; L.anFresh = false; }
     if (R.lsFt <= 2) return;
     var faded = !!R.lsFade; R.lsFade = false;
     var fps = R.lsFn / R.lsFt, late = (R.lsLate || 0) / R.lsFn, cur = R.lsQ || 1, lean = !!(G && G.lean);
@@ -3200,12 +3202,21 @@
     LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && (G.weak || lean) && !(X.direct === false) ? "+direct" : "") + (lean ? "+lean" : "") + " px" + R.pxCap;
     if (num(X.q, 0) > 0) { R.lsQ = num(X.q, 1); return; }
     var floor = G && G.weak ? 0.6 : 0.5;
+    // Too heavy only on repeated evidence: the same scene late (> 40 %) at the
+    // smallest size and slowest pace in three windows IN A ROW, none with a
+    // fade or a track analysis in it. Counted every window, so any other
+    // window (on time, or a fade) starts the count again. The first rule (one
+    // window over 25 %) had marked 11 of 13 scenes on the living room's
+    // Chromecast by 16:03 (2026-11-19) and saved them for good.
+    var strike = late > 0.4 && !faded && !!G && (G.weak || lean) && cur <= floor + 0.001 && R.maxFps <= 20;
+    R.lsStrike = strike && R.lsStrikeId === L.cur.id ? (R.lsStrike || 0) + 1 : strike ? 1 : 0;
+    R.lsStrikeId = L.cur.id;
     if (late > 0.08) {
       R.lsUp = 0;
       if (G && !G.weak && !lean && cur <= 0.8 && !(X.direct === false)) { G.lean = true; R.lsQ = 1; R.lsCeil = 0; return; }
       if (cur > floor + 0.001) { R.lsCeil = cur; R.lsCeilW = R.lsWin; R.lsQ = Math.max(floor, cur * 0.88); return; }
       if (R.maxFps > 20) { if (!R.lsFpsBase) R.lsFpsBase = R.maxFps; R.maxFps = R.maxFps >= 50 ? 30 : 20; R.lsQ = 1; R.lsCeil = 0; return; }
-      if (late > 0.25 && !faded && G && (G.weak || lean)) lsDropHeavy(L);
+      if (R.lsStrike >= 3) { R.lsStrike = 0; lsDropHeavy(L); }
       return;
     }
     if (late < 0.02 && cur < 1 && !L.next) {
@@ -3219,7 +3230,8 @@
 
   // Skip the scene showing now on this device, if the flavour keeps at least
   // two others; starts the next one at once.
-  var LS_HEAVY_KEY = "lyr.lightshow.heavy";
+  // v2: the first rule's lists (nearly every scene, 2026-11-19) are dropped.
+  var LS_HEAVY_KEY = "lyr.lightshow.heavy.v2";
   function lsHeavyStore(read, list) {
     try {
       var ls = root.localStorage, key = LS_HEAVY_KEY + "|" + (LS_GL_STATUS.renderer || "?");
