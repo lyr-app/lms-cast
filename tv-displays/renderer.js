@@ -2043,6 +2043,12 @@
     // Device experiments (sent by a caster, never by Settings): dom / direct
     // on-off, lines (render height cap), px (pixel-ratio cap of the canvas).
     out.exp = o.exp && typeof o.exp === "object" ? o.exp : null;
+    // How long the speakers play after the reported position (ms, set per TV
+    // through the Core's `tvLightshowOptions.delayMs`): the beats are drawn
+    // that much later. A UPnP renderer behind the bridge buffers; the living
+    // room's offset is set by eye with the owner (2026-11-19).
+    var dm = +o.delayMs;
+    out.delay = isFinite(dm) ? clamp(dm, -2000, 2000) / 1000 : 0;
     for (var k in LS_SLIDERS) out[k] = LS_SLIDERS[k];
     return out;
   }
@@ -2323,7 +2329,7 @@
     // The beat clock. The grid is known ahead, so each pulse starts rising
     // ~45 ms BEFORE its beat and peaks exactly on it, then falls over ~160 ms:
     // on time and smooth at once. LS_LEAD covers the frame and compositor.
-    var A = this.an, pos = S.pos + LS_LEAD, hit = 0, downHit = false, drop = false, env = 0, j;
+    var A = this.an, pos = S.pos + LS_LEAD - (this.opts.delay || 0), hit = 0, downHit = false, drop = false, env = 0, j;
     // Mood, 0 calm .. 1 intense: the track's own rating, nudged by how loud
     // this part of it is; eased over ~3 s. No analysis yet: calm-ish.
     var moodT = 0.3;
@@ -2969,7 +2975,7 @@
       break;
     }
     if (!lsSceneProg(G, L.cur.idx)) return false;
-    if (G.weak && !(L.opts.exp && L.opts.exp.direct === false)) return lsGlDrawDirect(G, L, w, h);
+    if ((G.weak || G.lean) && !(L.opts.exp && L.opts.exp.direct === false)) return lsGlDrawDirect(G, L, w, h);
     lsGlSize(G, w, h);
     // The bands as a 1-row texture: the scenes read it interpolated.
     var n = L.bands.length;
@@ -3101,6 +3107,54 @@
     return ov;
   }
 
+  // Every frame on time, then as sharp as that allows (owner, 2026-11-19:
+  // "stuttering and jumpy not smooth still too blurred"). Measured on the
+  // living room's Chromecast with Google TV (Mali-G31): the receiver asks for
+  // 30 fps, a frame that misses its 33 ms waits for a third refresh (50 ms),
+  // and at 26.6 fps / 446 lines the two interleaved — judder — while the old
+  // rule only grew the picture above 27 fps, so it never did.
+  //
+  // So it counts LATE frames (longer than 1.25 frame times), every 2 s:
+  // - more than 8 % late: shrink 12 % (never below 0.5, and remember the
+  //   size that failed for a minute so it does not climb straight back);
+  //   the four-pass show that is still late at 80 % switches to the lean
+  //   one-pass drawing (no trails, no finish) at full size instead, since
+  //   on such a chip one pass costs a fraction of four;
+  //   lean and at the floor and still late: pace at a slower even rate.
+  // - under 2 % late for three windows, and no scene blend running: grow 6 %.
+  // `exp.q` still pins the size for device experiments.
+  function lsPace(R, L, G, X, b, rh) {
+    var dt = R.dt || 0;
+    if (!(dt > 0) || !R.S.playing) return;
+    var frameS = 1 / Math.max(1, R.maxFps);
+    R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
+    if (dt > frameS * 1.25) R.lsLate = (R.lsLate || 0) + 1;
+    if (R.lsFt <= 2) return;
+    var fps = R.lsFn / R.lsFt, late = (R.lsLate || 0) / R.lsFn, cur = R.lsQ || 1, lean = !!(G && G.lean);
+    R.lsFt = 0; R.lsFn = 0; R.lsLate = 0;
+    R.lsWin = (R.lsWin || 0) + 1;
+    if (R.lsCeil && R.lsWin - R.lsCeilW > 30) R.lsCeil = 0;
+    LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.late = Math.round(late * 100); LS_GL_STATUS.target = R.maxFps;
+    LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id;
+    LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && (G.weak || lean) && !(X.direct === false) ? "+direct" : "") + (lean ? "+lean" : "") + " px" + R.pxCap;
+    if (num(X.q, 0) > 0) { R.lsQ = num(X.q, 1); return; }
+    var floor = G && G.weak ? 0.6 : 0.5;
+    if (late > 0.08) {
+      R.lsUp = 0;
+      if (G && !G.weak && !lean && cur <= 0.8 && !(X.direct === false)) { G.lean = true; R.lsQ = 1; R.lsCeil = 0; return; }
+      if (cur > floor + 0.001) { R.lsCeil = cur; R.lsCeilW = R.lsWin; R.lsQ = Math.max(floor, cur * 0.88); return; }
+      if (R.maxFps > 20) { if (!R.lsFpsBase) R.lsFpsBase = R.maxFps; R.maxFps = R.maxFps >= 50 ? 30 : 20; R.lsQ = 1; R.lsCeil = 0; }
+      return;
+    }
+    if (late < 0.02 && cur < 1 && !L.next) {
+      R.lsUp = (R.lsUp || 0) + 1;
+      var top = R.lsCeil ? R.lsCeil * 0.97 : 1;
+      if (R.lsUp >= 3 && cur * 1.06 <= top + 0.001) { R.lsQ = Math.min(1, cur * 1.06); R.lsUp = 0; }
+      return;
+    }
+    R.lsUp = 0;
+  }
+
   IMPL.lightshow = {
     bg: "#000000",
     full: true,
@@ -3128,7 +3182,10 @@
       var cssH = b.bh / Math.max(1, num(root.devicePixelRatio, 1) || 1);
       var X = L.opts.exp || {};
       var cap = num(X.lines, 0) > 0 ? num(X.lines, 0) : G && G.weak ? 360 : 1080;
-      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, Math.max(540, cssH * 1.5)) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
+      // One pass (lean) keeps no trail buffers, so it may draw the screen's
+      // own height; the four-pass show stays within 1.5x the CSS height.
+      var memCap = G && G.lean ? b.bh : Math.max(540, cssH * 1.5);
+      var q = R.lsQ || 1, rh = Math.max(90, Math.round(Math.min(b.bh, cap, memCap) * q)), rw = Math.max(160, Math.round(rh * b.bw / Math.max(1, b.bh)));
       // On screen, the GL canvas sits over the renderer's own canvas and the
       // browser scales it up (R.lsDom). Copying it into the 2D canvas every
       // frame was the cost on a 3rd-gen Chromecast: 7 fps at 540 lines
@@ -3152,26 +3209,7 @@
         ls2dDraw(R, Math.max(2, Math.round(rw / 2)), Math.max(2, Math.round(rh / 2)));
         if (R.ls2d) c.drawImage(R.ls2d.cv, 0, 0, b.bw, b.bh);
       }
-      var dt = R.dt || 0;
-      if (dt > 0 && R.S.playing) {
-        R.lsFt = (R.lsFt || 0) + dt; R.lsFn = (R.lsFn || 0) + 1;
-        if (R.lsFt > 2) {
-          var fps = R.lsFn / R.lsFt, cur = R.lsQ || 1;
-          // For the receiver's report: what it actually manages.
-          LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id; LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && G.weak && !(X.direct === false) ? "+direct" : "") + " px" + R.pxCap;
-          if (num(X.q, 0) > 0) { R.lsQ = num(X.q, 1); }
-          // Sharpness before frame rate. Measured on the living room's
-          // Chromecast with Google TV (Mali-G31, 2026-11-19): 13.8 fps at 810
-          // lines, 28.5 fps at 493; under the old "below 40 fps" rule it kept
-          // shrinking towards 324 lines, stretched over 3x on a 1080 TV
-          // ("blurred"). The show moves slowly, so ~25 fps is fine; it now
-          // shrinks only below 24 fps, and never under 55 % on a capable GPU.
-          else if (fps < Math.min(24, R.maxFps * 0.7)) { R.lsQ = Math.max(G && G.weak ? 0.6 : 0.55, cur * 0.85); R.lsUp = 0; }
-          else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
-          else R.lsUp = 0;
-          R.lsFt = 0; R.lsFn = 0;
-        }
-      }
+      lsPace(R, L, G, X, b, rh);
     },
     dyn: function (c, S, T, v, R) {
       var L = R.ls;
@@ -3656,7 +3694,7 @@
     lsDomDetach(this);
     if (this.lsFpsBase) { this.maxFps = this.lsFpsBase; this.lsFpsBase = 0; }
     if (this.lsGl) { try { var ext = this.lsGl.gl.getExtension("WEBGL_lose_context"); if (ext) ext.loseContext(); } catch (e) {} }
-    this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0;
+    this.lsGl = undefined; this.ls2d = null; this.ls = null; this.lsQ = 0; this.lsCeil = 0; this.lsUp = 0; this.lsLate = 0; this.lsFt = 0; this.lsFn = 0;
   };
   P.destroy = function () {
     this.dead = true;
@@ -4061,6 +4099,8 @@
     decodeLevels: decodeLevels,
     decodeSpectrum: decodeSpectrum,
     glStatus: function () { return LS_GL_STATUS; },
+    _lsPace: lsPace, // for the tests: the light show's pacing rule on its own
+
     parseLrc: parseLrc,
     formatText: formatText,
     create: function (canvas, opts) { return new Display(canvas, opts); },
