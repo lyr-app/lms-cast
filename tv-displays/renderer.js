@@ -2049,6 +2049,11 @@
     // room's offset is set by eye with the owner (2026-11-19).
     var dm = +o.delayMs;
     out.delay = isFinite(dm) ? clamp(dm, -2000, 2000) / 1000 : 0;
+    // Setting that delay by eye (owner, 2026-11-19: a surge is "too hard to
+    // tell"): a sharp white flash on every beat with the delay it is drawn at
+    // in large type, stepping through LS_CAL every 8 beats. The owner names
+    // the number that looked locked to the kick. Off unless asked for.
+    out.calibrate = o.calibrate === true;
     for (var k in LS_SLIDERS) out[k] = LS_SLIDERS[k];
     return out;
   }
@@ -3252,6 +3257,23 @@
     if (!L.next) L.startNext();
   }
 
+  // The calibration ladder, ms: the speaker delays tried in turn, 8 beats each.
+  var LS_CAL = [-200, -100, 0, 100, 200, 300, 400, 500, 600];
+  // The calibration flash now: the delay being shown (ms) and how bright the
+  // flash is (1 on the beat as drawn at that delay, fading over ~60 ms).
+  // Null without a steady beat grid.
+  function lsCalib(L, S) {
+    var A = L.an;
+    if (!A || !A.steady || !A.beats.length) return null;
+    var b = A.beats, base = S.pos + LS_LEAD, lo = 0, hi = b.length;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (b[mid] <= base) lo = mid + 1; else hi = mid; }
+    var ms = LS_CAL[Math.floor(lo / 8) % LS_CAL.length], at = base - ms / 1000;
+    lo = 0; hi = b.length;
+    while (lo < hi) { var m2 = (lo + hi) >> 1; if (b[m2] <= at) lo = m2 + 1; else hi = m2; }
+    var x = lo > 0 ? at - b[lo - 1] : -1;
+    return { ms: ms, flash: x >= 0 && x < 0.25 ? Math.exp(-x / 0.06) : 0 };
+  }
+
   IMPL.lightshow = {
     bg: "#000000",
     full: true,
@@ -3316,7 +3338,8 @@
     },
     dyn: function (c, S, T, v, R) {
       var L = R.ls;
-      var show = !!(L && L.opts.title && L.titleT > 0 && T.title);
+      var cal = L && L.opts.calibrate ? lsCalib(L, S) : null;
+      var titleOn = !!(L && L.opts.title && L.titleT > 0 && T.title), show = titleOn || !!cal;
       // GL canvas on screen: the title goes on a clear overlay above it.
       if (R.lsDom) {
         var ov = lsOverlay(R, show);
@@ -3331,6 +3354,19 @@
         c = oc;
       }
       if (!show) return;
+      if (cal) {
+        c.save();
+        c.globalAlpha = cal.flash;
+        c.fillStyle = "#ffffff";
+        c.beginPath(); c.arc(W / 2, H / 2, 170, 0, TAU); c.fill();
+        c.globalAlpha = 1;
+        c.textAlign = "center"; c.textBaseline = "alphabetic";
+        c.shadowColor = "rgba(0,0,0,0.9)"; c.shadowBlur = 10;
+        font(c, 800, 120, SANS); c.fillStyle = "#ffffff";
+        c.fillText((cal.ms > 0 ? "+" : "") + cal.ms + " ms", W / 2, 170);
+        c.restore();
+      }
+      if (!titleOn) return;
       var a = Math.min(1, L.titleT / 1.5, (8 - L.titleT) / 0.8);
       if (!(a > 0)) return;
       c.globalAlpha = a;
@@ -4203,6 +4239,7 @@
     decodeSpectrum: decodeSpectrum,
     glStatus: function () { return LS_GL_STATUS; },
     _lsPace: lsPace, // for the tests: the light show's pacing rule on its own
+    _lsCalib: lsCalib,
 
     parseLrc: parseLrc,
     formatText: formatText,
