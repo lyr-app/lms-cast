@@ -2035,17 +2035,22 @@
 
   function lsOptions(o) {
     o = o || {};
-    // Flashes are off unless asked for (owner, 2026-10-11).
-    var out = { title: o.title !== false, flashes: o.flashes === true, palette: LS_PALETTES[o.palette] && o.palette !== "mono" ? o.palette : "" };
+    // Only the flavour, the colours and the track name are choices now (owner,
+    // 2026-11-19: "too many user options"). The six sliders and Flashes are
+    // gone: saved values are ignored and the show runs as designed, from the
+    // music. Flashes are always off.
+    var out = { title: o.title !== false, flashes: false, palette: LS_PALETTES[o.palette] && o.palette !== "mono" ? o.palette : "" };
     // Device experiments (sent by a caster, never by Settings): dom / direct
     // on-off, lines (render height cap), px (pixel-ratio cap of the canvas).
     out.exp = o.exp && typeof o.exp === "object" ? o.exp : null;
-    if (o.trails == null && o.depth != null) o = Object.assign({}, o, { trails: o.depth }); // first release called it depth
-    for (var k in LS_SLIDERS) { var v = +o[k]; out[k] = o[k] != null && o[k] !== "" && isFinite(v) ? clamp(v, 0, 1) : LS_SLIDERS[k]; }
+    for (var k in LS_SLIDERS) out[k] = LS_SLIDERS[k];
     return out;
   }
-  // Scene length from the pace slider: 2 min down to 6 s.
-  function lsLife(pace) { return 120 * Math.pow(6 / 120, pace); }
+  // Scene length: about a minute and a quarter on a calm track, under a
+  // minute on an intense one (was 30-50 s, and with few scenes per flavour
+  // the same ones kept coming back: owner, 2026-11-19 "scenes repeat too
+  // often").
+  function lsLife(mood, rnd) { return 60 * (1.35 - 0.5 * mood) * (0.8 + 0.4 * rnd()); }
   // How far ahead of the play position the beat is drawn: one frame plus the
   // compositor, so the pulse lands when the sound does.
   var LS_LEAD = 0.05;
@@ -2115,6 +2120,11 @@
       idx.reverse();
       // Kept within 0.6-1: the grid is steady, so the motion should be too.
       for (j = 0; j < idx.length; j++) { beats.push((idx[j] + 0.5) * bs); strength.push(clamp(0.6 + on[idx[j]] * oN, 0.6, 1)); }
+      // The grid sits on 50 ms spectrum buckets, so a 93 bpm track's beats
+      // came 0.60 or 0.65 s apart (Blank & Jones "Face A La Mer", 2026-11-19).
+      // A straight line through the nine beats around each one evens that
+      // out and still follows a tempo that drifts.
+      beats = lsEvenBeats(beats);
       // The downbeat: of the four places in a bar, the one whose beats carry
       // the most kick drum.
       var bestD = -1;
@@ -2169,6 +2179,21 @@
     return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec };
   }
 
+  // Each beat moved onto the least-squares line through the beats around it
+  // (four either side), so the spacing is even, not quantised to buckets.
+  function lsEvenBeats(b) {
+    var n = b.length, out = [], R = 4;
+    if (n < 3) return b.slice();
+    for (var j = 0; j < n; j++) {
+      var a0 = Math.max(0, j - R), a1 = Math.min(n - 1, j + R), m = a1 - a0 + 1, sx = 0, sy = 0, sxx = 0, sxy = 0;
+      for (var i = a0; i <= a1; i++) { sx += i; sy += b[i]; sxx += i * i; sxy += i * b[i]; }
+      var den = m * sxx - sx * sx, sl = den ? (m * sxy - sx * sy) / den : 0;
+      out.push((sy - sl * sx) / m + sl * j);
+    }
+    for (j = 1; j < n; j++) if (out[j] <= out[j - 1]) out[j] = out[j - 1] + 1e-3;
+    return out;
+  }
+
   // A smooth random walk in 0..1: two slow sines with random rates and phases.
   function lsWalk(rnd) {
     return { base: rnd(), target: null, amp: 0.12 + rnd() * 0.2, f1: 0.03 + rnd() * 0.12, f2: 0.07 + rnd() * 0.18, p1: rnd() * TAU, p2: rnd() * TAU };
@@ -2187,11 +2212,15 @@
     if (!ok.length) ok = all;
     var pool = ok.filter(function (s) { return L.recent.indexOf(s) < 0; });
     if (!pool.length) pool = ok;
-    var wsum = 0, ws = pool.map(function (s) { var dI = (LS_SCENE_INTENSITY[s] - L.mood) / 0.3, w = Math.exp(-dI * dI) + 0.05; wsum += w; return w; });
+    // Mood leans the choice; it no longer narrows it to two or three scenes
+    // (width 0.3, floor 0.05 left Cosmic on a calm track alternating Julia and
+    // the fractal, 2026-11-19).
+    var wsum = 0, ws = pool.map(function (s) { var dI = (LS_SCENE_INTENSITY[s] - L.mood) / 0.45, w = Math.exp(-dI * dI) + 0.3; wsum += w; return w; });
     var pick = rnd() * wsum, id = pool[pool.length - 1];
     for (i = 0; i < pool.length; i++) { pick -= ws[i]; if (pick <= 0) { id = pool[i]; break; } }
+    // Every other scene of the flavour comes up before this one does again.
     L.recent.push(id);
-    while (L.recent.length > Math.min(3, all.length - 1)) L.recent.shift();
+    while (L.recent.length > Math.max(1, ok.length - 1)) L.recent.shift();
     var pal = lsPalette(L, rnd), walks = [], k = [];
     for (i = 0; i < 8; i++) { walks.push(lsWalk(rnd)); k.push(rnd()); }
     return {
@@ -2199,7 +2228,7 @@
       c: pal[0].slice(), d: pal[1].slice(), cT: pal[0].slice(), dT: pal[1].slice(), post: F.post,
       hue: rnd(), hueDir: rnd() < 0.5 ? -1 : 1, fbVar: 0.8 + rnd() * 0.4, zoomVar: 0.6 + rnd() * 0.8,
       tint: rnd() < 0.6 ? [0.35, 1, 0.45] : [1, 0.68, 0.25],
-      spin: (rnd() - 0.5) * 0.25, time: rnd() * 50, age: 0, life: lsLife(L.opts.pace) * (1.8 - L.mood) * (0.75 + rnd() * 0.5),
+      spin: (rnd() - 0.5) * 0.25, time: rnd() * 50, age: 0, life: lsLife(L.mood, rnd),
     };
   }
 
@@ -2210,7 +2239,7 @@
     for (var k in LS_SLIDERS) this.sm[k] = this.opts[k];
     this.flavour = LS_FLAVOURS[flavour] ? flavour : "journey";
     this.t = 0; this.goS = 0.2; this.mood = 0.3; this.punch = 0; this.surge = 0; this.zoomFlow = 0.3; this.zoomPS = 0.1; this.spinK = 0.3; this.dt = 0;
-    this.env = 0; this.beat = 0; this.kickT = 0; this.kick = 0; this.glow = 0; this.flash = 0; this.flashT = 0;
+    this.env = 0; this.pulse = 0; this.beat = 0; this.kickT = 0; this.kick = 0; this.glow = 0; this.flash = 0; this.flashT = 0;
     this.bands = new Float32Array(16); this.bass = 0; this.mid = 0; this.treb = 0; this.level = 0;
     this.recent = []; this.next = null; this.mix = 0; this.mixDur = 4; this.trans = 0; this.unsupported = {}; this.weakSet = false;
     this.lastPos = -1; this.bi = 0; this.di = 0; this.beatCount = 0; this.beatIdx = -1; this.an = null; this.anFor = null;
@@ -2220,7 +2249,6 @@
   LightShow.prototype.setOptions = function (o) {
     var was = this.opts;
     this.opts = lsOptions(o);
-    if (this.opts.pace !== was.pace) this.cur.life = lsLife(this.opts.pace) * (1.8 - this.mood) * (0.75 + this.rnd() * 0.5);
     // A new colour choice blends into the scenes showing now.
     if (this.opts.palette !== was.palette) {
       var self = this;
@@ -2251,10 +2279,18 @@
   };
   LightShow.prototype.startNext = function (dur) {
     if (this.next) { this.cur = this.next; this.next = null; }
-    this.next = lsPickScene(this);
-    this.mix = 0; this.trans = Math.floor(this.rnd() * 3);
-    // 2.5-8 s; calmer energy blends slower.
-    this.mixDur = Math.max(2.5, dur || 0, (3 + this.rnd() * 3) * (1.35 - this.sm.energy * 0.7) * (1.6 - 0.8 * this.mood));
+    var nx = this.next = lsPickScene(this), cu = this.cur;
+    // Gradual, never a wipe (owner, 2026-11-19: "transitions between scenes
+    // are too hard instead of nice gradual change"). Was 2.5-8 s with an iris
+    // or a noise dissolve two times in three, and the new scene arrived in
+    // its own colours. Now always a crossfade over 16 beats of the track
+    // (8-14 s; 10 s with no steady beat), and the new scene starts in the
+    // colours on screen and drifts to its own over the next ~10 s.
+    nx.c = cu.c.slice(); nx.d = cu.d.slice(); nx.hue = cu.hue;
+    this.mix = 0; this.trans = 0;
+    var A = this.an, beatS = A && A.steady && A.bpm > 0 ? 60 / A.bpm : 0;
+    // A flavour change (someone pressed a button) passes its own, shorter time.
+    this.mixDur = dur || (beatS ? clamp(16 * beatS, 8, 14) : 10);
   };
   LightShow.prototype.params = function (sc) {
     var t = this.t * 0.5, out = [];
@@ -2316,6 +2352,18 @@
     } else this.lastPos = -1;
     this.env = env;
     this.beat = env * EK;
+    // The beat's shape for the motion: a raised cosine on every grid beat,
+    // smooth across the whole beat (no edge anywhere), peaking on it. Wide
+    // on calm tracks (a slow swell each beat), narrower on intense ones.
+    var pulse = 0;
+    if (A && A.steady && playing && beats.length > 1) {
+      var bj = Math.max(0, Math.min(beats.length - 2, this.bi - 1)), b0 = beats[bj], b1 = beats[bj + 1];
+      if (pos >= b0 - 1 && pos <= b1 + 1 && b1 > b0) {
+        var ph = (pos - b0) / (b1 - b0);
+        pulse = Math.pow(0.5 + 0.5 * Math.cos(TAU * ph), 1.5 + 3 * I);
+      }
+    }
+    this.pulse += (pulse - this.pulse) * Math.min(1, dt * 30);
     var flashK = this.opts.flashes ? F.flash : 0;
     if (hit) {
       this.beatCount++;
@@ -2337,8 +2385,14 @@
     // no steady beat it follows the loudness; paused it barely drifts.
     // Travel speed follows the mood first (a calm track drifts, an intense
     // one rushes), then the bass; the beat adds only a little, scaled by mood.
+    // The TEMPO sets the pace (owner, 2026-11-19: "no relationship to bpm"):
+    // a 60 bpm ballad moves at half the speed of a 120 bpm track, 180 bpm at
+    // 1.5x, and each beat drives the picture forward (below). Before, speed
+    // came from the mood alone and the beat's share was mood squared, ~3 % on
+    // a calm 93 bpm track: nothing visible kept time.
+    var tempoK = A && A.steady && A.bpm > 0 ? clamp(A.bpm / 120, 0.45, 1.5) : 0.6;
     var push = 0.3 + sm.energy * 1.4;
-    var go = playing ? 0.1 + 0.75 * I + (A && A.steady ? 0.45 * this.bass : 0.3 * this.level) * I * push : 0.05;
+    var go = playing ? (0.12 + 0.55 * I) * tempoK + (A && A.steady ? 0.2 * this.bass : 0.3 * this.level) * I * push : 0.05;
     this.goS += (go - this.goS) * Math.min(1, dt * 1.5);
     // The beat shows as a forward glide (the tunnel, stars and scenes move on
     // a little faster round each beat, eased over ~150 ms) and in the shapes
@@ -2347,7 +2401,11 @@
     // 2026-10-11: "some of these just shake and alternate left right").
     var bk = sm.energy * 2;
     this.surge += ((playing ? this.env : 0) - this.surge) * Math.min(1, dt * 6);
-    var dT = dt * (this.goS + 0.6 * this.surge * I * I * bk) * F.speed * Math.pow(16, sm.speed - 0.5) * (this.weak ? 0.6 : 1);
+    // Forward surge on every beat: the scene runs ahead up to 2.2x round the
+    // beat and eases back between beats. Forward only: the camera does not
+    // rock or push (that read as shaking, 2026-10-11).
+    this.surgeK = 1 + 1.2 * this.pulse;
+    var dT = dt * (this.goS * this.surgeK + 0.6 * this.surge * I * I * bk) * F.speed * Math.pow(16, sm.speed - 0.5) * (this.weak ? 0.6 : 1);
     // Only a drop moves the camera (a slow push), and Beat strength above
     // three quarters adds a gentle one per beat for those who want it.
     this.punch = Math.min(0.06, this.kick + this.env * 0.02 * I * Math.max(0, bk - 1.5) * 2);
@@ -2359,10 +2417,10 @@
     // second on a calm track, ~1.4x on an intense one, x(0.3 + trails).
     var flowN = clamp(this.zoomFlow, 0, 1.3), trl = clamp(sm.trails * F.trails, 0, 1);
     this.dt = dt;
-    this.zoomPS = (0.02 + 0.45 * flowN) * (0.3 + trl) + this.kick * 8;
+    this.zoomPS = (0.02 + 0.45 * flowN) * (0.3 + trl) * (this.surgeK || 1) + this.kick * 8;
     this.spinK = flowN * (0.5 + trl) * 0.8;
     this.t += dT;
-    var cyc = (F.hue + 0.004) * Math.pow(sm.cycle * 2, 2) * (0.35 + I), pk = Math.min(1, dt * 1.2);
+    var cyc = (F.hue + 0.004) * Math.pow(sm.cycle * 2, 2) * (0.35 + I), pk = Math.min(1, dt * 0.25);
     var cs = [this.cur, this.next];
     for (i = 0; i < 2; i++) {
       var sc = cs[i];
@@ -2380,7 +2438,7 @@
     if (this.next) {
       this.mix += dt / this.mixDur;
       if (this.mix >= 1) { this.cur = this.next; this.next = null; this.mix = 0; }
-    } else if (drop) this.startNext(2.5);
+    } else if (drop) this.startNext();
     else if (this.cur.age > this.cur.life && (downHit || !(A && A.steady) || !playing || this.cur.age > this.cur.life + 6)) this.startNext();
     // Title: shown for 8 s on each new track.
     var tk = R.T.title + "|" + R.T.artist;
@@ -2702,7 +2760,11 @@
     "  if (crt || uPost > 2.5){",
     "    float rad = crt ? 0.006 : 0.014; vec3 g = vec3(0.0);",
     "    for (int i = 0; i < 8; i++){ float a = float(i) * 0.785398; g += texture2D(uTex, uv + vec2(cos(a) / uAspect, sin(a)) * rad).rgb; }",
-    "    c = c * 0.6 + g * (crt ? 0.07 : 0.08);",
+    // Soft glow (Dreamy, Cosmic) was 60 % the pixel + 64 % its neighbours 1.4 %
+    // of the height away: a blur over the whole picture ("blurred", owner,
+    // 2026-11-19). Now the picture stays sharp and only its bright parts
+    // spill a halo.
+    "    if (crt) c = c * 0.6 + g * 0.07; else c += max(g * 0.125 - 0.45, 0.0) * 0.9;",
     "  }",
     "  float l = dot(c, vec3(0.3, 0.5, 0.2));",
     "  c = max(mix(vec3(l), c, uSat), 0.0) * uBright;",
@@ -2874,7 +2936,7 @@
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, n, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, G.specBuf);
     gl.activeTexture(gl.TEXTURE0);
-    var m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
+    var m = L.next ? lsEase(L.mix) : 0;
     gl.disable(gl.BLEND);
     lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], -1, w, h);
     if (L.next && m > 0.0005) {
@@ -2917,7 +2979,7 @@
     gl.bindTexture(gl.TEXTURE_2D, G.spec);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, n, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, G.specBuf);
-    var nx = L.next || L.cur, m = L.next ? L.mix * L.mix * (3 - 2 * L.mix) : 0;
+    var nx = L.next || L.cur, m = L.next ? lsEase(L.mix) : 0;
     lsDrawScene(G, L, L.cur, G.scenes[L.cur.idx], 0, w, h);
     if (L.next && m > 0.0005) lsDrawScene(G, L, L.next, G.scenes[L.next.idx], 1, w, h);
     // Composite: the blend, the trails, the flash, the tone map.
@@ -2959,6 +3021,10 @@
     G.cur = dst;
     return true;
   }
+
+  // Smootherstep: starts and ends with no speed and no acceleration, so a
+  // crossfade has no visible start or end.
+  function lsEase(x) { x = clamp(x, 0, 1); return x * x * x * (x * (6 * x - 15) + 10); }
 
   // --- 2D fallback -------------------------------------------------------------
   function lsHsl(h, s, l, a) { return "hsla(" + Math.round(((h % 1) + 1) % 1 * 360) + "," + Math.round(s) + "%," + Math.round(l) + "%," + (a == null ? 1 : Math.round(a * 1000) / 1000) + ")"; }
@@ -3094,7 +3160,13 @@
           // For the receiver's report: what it actually manages.
           LS_GL_STATUS.fps = Math.round(fps * 10) / 10; LS_GL_STATUS.q = Math.round(cur * 100) / 100; LS_GL_STATUS.lines = rh; LS_GL_STATUS.canvas = b.bw + "x" + b.bh; LS_GL_STATUS.scene = L.cur.id; LS_GL_STATUS.mode = (R.lsDom ? "dom" : "copy") + (G && G.weak && !(X.direct === false) ? "+direct" : "") + " px" + R.pxCap;
           if (num(X.q, 0) > 0) { R.lsQ = num(X.q, 1); }
-          else if (fps < Math.min(40, R.maxFps * 0.7)) { R.lsQ = Math.max(G && G.weak ? 0.6 : 0.4, cur * 0.85); R.lsUp = 0; }
+          // Sharpness before frame rate. Measured on the living room's
+          // Chromecast with Google TV (Mali-G31, 2026-11-19): 13.8 fps at 810
+          // lines, 28.5 fps at 493; under the old "below 40 fps" rule it kept
+          // shrinking towards 324 lines, stretched over 3x on a 1080 TV
+          // ("blurred"). The show moves slowly, so ~25 fps is fine; it now
+          // shrinks only below 24 fps, and never under 55 % on a capable GPU.
+          else if (fps < Math.min(24, R.maxFps * 0.7)) { R.lsQ = Math.max(G && G.weak ? 0.6 : 0.55, cur * 0.85); R.lsUp = 0; }
           else if (fps > R.maxFps * 0.9 && cur < 1) { R.lsUp = (R.lsUp || 0) + 1; if (R.lsUp >= 3) { R.lsQ = Math.min(1, cur * 1.12); R.lsUp = 0; } }
           else R.lsUp = 0;
           R.lsFt = 0; R.lsFn = 0;
