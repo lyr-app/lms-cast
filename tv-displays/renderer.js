@@ -2105,6 +2105,22 @@
       var y0 = rs[bestL - minL - 1], y2 = rs[bestL - minL + 1], den = y0 - 2 * rBest + y2;
       if (den < 0) P = bestL + 0.5 * (y0 - y2) / den;
     }
+    // A dotted (3-against-2) rhythm can out-correlate the beat: Boris Brejcha
+    // "Happinezz" (2026-11-20) peaked at 85 bpm = 1.5 beats of ~128, so the
+    // grid fell between kicks. Then 4/3 of the period (= 2 real beats)
+    // correlates about as strongly as the period itself (0.50 against 0.47)
+    // and 2/3 of it (= the real beat) shows (0.25); on six other tracks
+    // (93-120 bpm, downtempo to band rock) 4/3 stayed at or under 0.49 of
+    // the peak. So: 4/3 over 75 % of the peak and 2/3 over 0.15 means the
+    // beat is 2/3 of the period. Steadiness is still judged on the stronger
+    // period.
+    var rAtL = function (Lf) {
+      var L0 = Math.floor(Lf), fr = Lf - L0, s0 = 0, s1 = 0;
+      for (var k = L0 + 1; k < n; k++) { s0 += on[k] * on[k - L0]; s1 += on[k] * on[k - L0 - 1]; }
+      return r0 > 0 ? ((1 - fr) * s0 + fr * s1) / r0 : 0;
+    };
+    var r43 = P * 4 / 3 <= maxL ? rAtL(P * 4 / 3) : 0, r23 = P * 2 / 3 >= minL ? rAtL(P * 2 / 3) : 0;
+    if (r43 > 0.75 * rBest && r23 > 0.15) P = P * 2 / 3;
     // Real music measured 2026-10-11: blues 81 bpm (r 0.51, x17 the median),
     // funk 92 bpm (r 0.53, x5.8), fado with no drums (r 0.15, x1.6).
     // A busy band track spreads its onsets, so every lag correlates a little
@@ -3235,14 +3251,23 @@
 
   // Skip the scene showing now on this device, if the flavour keeps at least
   // two others; starts the next one at once.
-  // v2: the first rule's lists (nearly every scene, 2026-11-19) are dropped.
-  var LS_HEAVY_KEY = "lyr.lightshow.heavy.v2";
+  // v3: each mark carries the time it was made and lapses after a day, so a
+  // scene is tried again rather than lost for good. Overnight on 2026-11-19/20
+  // the living room's Chromecast had marked 7 of 13 (fractal and julia among
+  // them, though fractal had run 3-8 % late at 540 lines the afternoon
+  // before): a slow evening narrowed the show for good. v1/v2 lists dropped.
+  var LS_HEAVY_KEY = "lyr.lightshow.heavy.v3", LS_HEAVY_TTL_MS = 24 * 3600 * 1000;
   function lsHeavyStore(read, list) {
     try {
-      var ls = root.localStorage, key = LS_HEAVY_KEY + "|" + (LS_GL_STATUS.renderer || "?");
+      var ls = root.localStorage, key = LS_HEAVY_KEY + "|" + (LS_GL_STATUS.renderer || "?"), t = Date.now();
       if (!ls) return [];
-      if (read) { var v = JSON.parse(ls.getItem(key) || "[]"); return Array.isArray(v) ? v.filter(function (x) { return LS_SCENES.indexOf(x) >= 0; }) : []; }
-      ls.setItem(key, JSON.stringify(list));
+      var v = JSON.parse(ls.getItem(key) || "{}"), marks = {};
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        Object.keys(v).forEach(function (id) { var at = +v[id]; if (LS_SCENES.indexOf(id) >= 0 && isFinite(at) && t - at < LS_HEAVY_TTL_MS) marks[id] = at; });
+      }
+      if (read) return Object.keys(marks);
+      (list || []).forEach(function (id) { if (LS_SCENES.indexOf(id) >= 0 && !marks[id]) marks[id] = t; });
+      ls.setItem(key, JSON.stringify(marks));
     } catch (e) {}
     return [];
   }
@@ -4240,6 +4265,7 @@
     glStatus: function () { return LS_GL_STATUS; },
     _lsPace: lsPace, // for the tests: the light show's pacing rule on its own
     _lsCalib: lsCalib,
+    _lsHeavyStore: lsHeavyStore,
 
     parseLrc: parseLrc,
     formatText: formatText,
