@@ -835,9 +835,11 @@
           displayLightshowKey = loKey;
           displayRenderer.setOptions(lo);
         }
-        // Levels ride on the payload once the Core has analysed the track.
+        // Levels ride on the payload once the Core has analysed the track; for
+        // radio a live window rides on each NOW_PLAYING (its startSec moves, so
+        // it is part of the key; lyriqapp 2026-11-20).
         const lv = payload.levels;
-        const lvKey = lv && lv.data ? info.trackId + '|' + lv.bucketSeconds + '|' + lv.data.length : info.trackId + '|none';
+        const lvKey = lv && lv.data ? info.trackId + '|' + lv.bucketSeconds + '|' + lv.data.length + '|' + (lv.startSec || 0) : info.trackId + '|none';
         if (lvKey !== displayLevelsKey) {
           displayLevelsKey = lvKey;
           displayRenderer.setLevels(lv && lv.data ? lib.decodeLevels(lv) : null);
@@ -852,7 +854,7 @@
         // Spectrum bands, when the Core has analysed them (older renderers
         // without setSpectrum simply ignore it).
         const sp = payload.spectrum;
-        const spKey = sp && sp.data ? info.trackId + '|' + sp.bucketSeconds + '|' + sp.data.length : info.trackId + '|none';
+        const spKey = sp && sp.data ? info.trackId + '|' + sp.bucketSeconds + '|' + sp.data.length + '|' + (sp.startSec || 0) : info.trackId + '|none';
         if (fullSpectrumTrackId !== info.trackId && spKey !== displaySpectrumKey && typeof displayRenderer.setSpectrum === 'function') {
           displaySpectrumKey = spKey;
           displayRenderer.setSpectrum(sp && sp.data && lib.decodeSpectrum ? lib.decodeSpectrum(sp) : null);

@@ -67,7 +67,10 @@
     var idx = function (name, alt) { var i = frame.indexOf(name); return i >= 0 ? i : frame.indexOf(alt); };
     var cols = { rmsL: idx("rmsL", "rms"), rmsR: idx("rmsR", "rms"), peakL: idx("peakL", "peak"), peakR: idx("peakR", "peak") };
     var bucket = +p.bucketSeconds > 0 ? +p.bucketSeconds : 0.25;
-    var out = { bucketSeconds: bucket, duration: +p.duration > 0 ? +p.duration : n * bucket };
+    // `startSec`: a window that begins mid-stream (live analysis of radio,
+    // 2026-11-20); every position read subtracts it. 0 for a whole track.
+    var start = +p.startSec > 0 ? +p.startSec : 0;
+    var out = { bucketSeconds: bucket, start: start, duration: +p.duration > 0 ? +p.duration : start + n * bucket };
     Object.keys(cols).forEach(function (k) {
       var a = new Float32Array(n), ci = cols[k];
       if (ci >= 0) for (var i = 0; i < n; i++) a[i] = BYTE_LIN[bytes[i * fl + ci]];
@@ -1951,7 +1954,8 @@
     var bucket = +p.bucketSeconds > 0 ? +p.bucketSeconds : 0.05;
     var hz = Array.isArray(p.bandHz) && p.bandHz.length === bands ? p.bandHz.map(Number) : null;
     if (!hz) { hz = []; for (i = 0; i < bands; i++) hz.push(40 * Math.pow(250, i / Math.max(1, bands - 1))); }
-    return { bucketSeconds: bucket, duration: +p.duration > 0 ? +p.duration : n * bucket, bands: bands, bandHz: hz, db: db };
+    var start = +p.startSec > 0 ? +p.startSec : 0; // a mid-stream window (see decodeLevels)
+    return { bucketSeconds: bucket, start: start, duration: +p.duration > 0 ? +p.duration : start + n * bucket, bands: bands, bandHz: hz, db: db };
   }
   function specReference(sp) {
     var v = [];
@@ -2208,7 +2212,10 @@
     sv.sort(function (x, y) { return x - y; });
     var s20 = sv[Math.floor(sv.length * 0.2)] || 0, s90 = sv[Math.floor(sv.length * 0.9)] || 1;
     for (sI = 0; sI < secs; sI++) sec[sI] = clamp((sec[sI] - s20) / Math.max(0.02, s90 - s20), 0, 1);
-    return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec };
+    // A mid-stream window: times move to stream time; `sec` is indexed from it.
+    var st0 = sp.start || 0;
+    if (st0) { var sh = function (a) { for (var q = 0; q < a.length; q++) a[q] += st0; }; sh(beats); sh(drops); sh(accents); }
+    return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec, start: st0 };
   }
 
   // Each beat moved onto the least-squares line through the beats around it
@@ -2359,7 +2366,7 @@
     // Mood, 0 calm .. 1 intense: the track's own rating, nudged by how loud
     // this part of it is; eased over ~3 s. No analysis yet: calm-ish.
     var moodT = 0.3;
-    if (A) moodT = clamp(A.intensity + 0.3 * ((A.sec[Math.min(A.sec.length - 1, Math.max(0, Math.floor(pos)))] || 0) - 0.5), 0, 1);
+    if (A) moodT = clamp(A.intensity + 0.3 * ((A.sec[Math.min(A.sec.length - 1, Math.max(0, Math.floor(pos - (A.start || 0))))] || 0) - 0.5), 0, 1);
     this.mood += (moodT - this.mood) * Math.min(1, dt * 0.35);
     var I = this.mood;
     // Calm music: a slow, round swell around each beat. Intense: a short push.
@@ -3971,8 +3978,9 @@
   P._physics = function (dt, dpos) {
     var S = this.S, L = this.levels, playing = S.playing && !!L, settled = !S.playing && dpos === 0;
     var bucket = L ? L.bucketSeconds : 1;
-    var rms = L ? [levelAt(L.rmsL, bucket, S.pos), levelAt(L.rmsR, bucket, S.pos)] : [0, 0];
-    var pk = L ? [levelAt(L.peakL, bucket, S.pos), levelAt(L.peakR, bucket, S.pos)] : [0, 0];
+    var lp = S.pos - (L && L.start || 0);
+    var rms = L ? [levelAt(L.rmsL, bucket, lp), levelAt(L.rmsR, bucket, lp)] : [0, 0];
+    var pk = L ? [levelAt(L.peakL, bucket, lp), levelAt(L.peakR, bucket, lp)] : [0, 0];
     var steps = Math.max(1, Math.ceil(Math.min(dt, 0.1) / 0.0167)), h = Math.min(dt, 0.1) / steps;
     for (var c = 0; c < 2; c++) {
       var r = playing ? rms[c] : 0, p = playing ? pk[c] : 0;
@@ -4030,7 +4038,7 @@
       nfr = Math.floor(SP.db.length / SP.bands);
       // 60 ms ahead: the bars' attack and the frame they land in put the
       // display a little behind the sound, which read as lagging (user).
-      var xs = (S.pos + 0.06) / SP.bucketSeconds - 0.5;
+      var xs = (S.pos + 0.06 - (SP.start || 0)) / SP.bucketSeconds - 0.5;
       if (xs > nfr) spPlay = false;
       xs = clamp(xs, 0, Math.max(0, nfr - 1.001)); fi = Math.floor(xs); fr = xs - fi;
     }
