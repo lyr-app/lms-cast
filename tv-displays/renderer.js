@@ -1990,11 +1990,13 @@
   // (onset autocorrelation) and lays a steady beat grid along it (dynamic
   // programming, Ellis 2007). A track without a steady pulse (fado, classical,
   // ambient) gets no beats at all and flows with its loudness instead, and so
-  // does anything with no spectrum yet. Beats MOVE the picture (a camera push,
-  // speed, size); they only change its BRIGHTNESS when Flashes is on, which is
-  // off by default. Flashes never come faster than 2.5 a second. The camera
-  // itself stays still on the beat (no rock, no push at the default Beat
-  // strength): that read as shaking.
+  // does anything with no spectrum yet. Each beat speeds the scene on, and
+  // every scene's own shapes answer it (uBeat): tunnel rings thicken and
+  // flare, streaks stretch, rings and the grid's sun swell, beams fatten, a
+  // fractal or Julia set shifts shape, the scope's figure jumps out (owner,
+  // 2026-11-22: "most of them dont animate to the beat at all" — eleven of
+  // thirteen scenes read no beat once Flashes went). The camera itself stays
+  // still on the beat (no rock, no push): that read as shaking.
   //
   // Flavours are the variants; the sliders (setOptions) scale any flavour.
   // Without WebGL (old browsers, the Node tests) a 2D version draws a radial
@@ -2215,7 +2217,7 @@
     // A mid-stream window: times move to stream time; `sec` is indexed from it.
     var st0 = sp.start || 0;
     if (st0) { var sh = function (a) { for (var q = 0; q < a.length; q++) a[q] += st0; }; sh(beats); sh(drops); sh(accents); }
-    return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec, start: st0 };
+    return { beats: beats, strength: strength, down: down, drops: drops, accents: accents, accStr: accStr, bpm: bpmV, steady: steady, pulse: rBest, intensity: intensity, fluxMean: fluxMean, sec: sec, start: st0, on: on };
   }
 
   // Each beat moved onto the least-squares line through the beats around it
@@ -2532,17 +2534,17 @@
     "  float z = 0.35 / rr + t * (0.6 + k.y * 1.4);",
     "  float tw = ang / TAU + z * (k.z - 0.5) * 0.25;",
     "  float fz = z * (0.5 + k.w * 1.5), wz = fw(fz) + 0.02;",
-    "  float st = mix(0.6, smoothstep(-wz, wz, abs(fract(fz) - 0.5) - 0.06 - 0.12 * a.x), lod(fz));",
+    "  float st = mix(0.6, smoothstep(-wz, wz, abs(fract(fz) - 0.5) - 0.06 - 0.12 * a.x - 0.12 * uBeat), lod(fz));",
     // Angle terms get their pixel width worked out (uPx / r): atan wraps on
     // the left, and fwidth across the wrap drew a seam there.
     "  float nr = floor(2.0 + q.x * 10.0), rn = tw * nr;",
     "  float rays = mix(0.5, 0.5 + 0.5 * cos(TAU * rn), lodw(nr * (uPx / (TAU * max(r, 0.001)) + abs(k.z - 0.5) * 0.25 * fw(z))));",
     "  float v = mix(st, st * rays, b.z);",
-    "  float zr = z * 0.25, ring = smoothstep(0.08 + fw(zr), 0.0, abs(fract(zr) - 0.5)) * lod(zr);",
+    "  float zr = z * 0.25, ring = smoothstep(0.08 + 0.1 * uBeat + fw(zr), 0.0, abs(fract(zr) - 0.5)) * lod(zr);",
     "  vec3 col = pal(z * 0.05 + 0.15 * b.w * sin(ang * floor(1.0 + q.y * 3.0)) + b.x * 0.3, c, d) * (0.15 + v * 0.95);",
-    "  col += pal(z * 0.05 + 0.5, c, d) * ring * (0.3 + uBass * 0.6 + uGlow);",
+    "  col += pal(z * 0.05 + 0.5, c, d) * ring * (0.3 + uBass * 0.6 + uGlow + uBeat * 1.6);",
     "  col *= smoothstep(0.0, 0.18, rr);",
-    "  col += pal(0.3, c, d) * exp(-rr * 9.0) * (0.4 + uGlow);",
+    "  col += pal(0.3, c, d) * exp(-rr * 9.0) * (0.4 + uGlow + uBeat * 0.8);",
     "  return col; }",
   ].join("\n"),
     [
@@ -2553,10 +2555,10 @@
     "    float fl = float(L), cells = 50.0 + fl * 37.0 + floor(k.x * 60.0);",
     "    float ca = (ang / TAU + 0.5) * cells, id = floor(ca), h = hash(vec2(id, fl * 7.1 + 3.0));",
     "    float pos = fract(h * 7.3 + t * (0.1 + 0.18 * h) * (1.0 + fl * 0.4) * (0.6 + k.y));",
-    "    float rs = pos * pos * 1.9, len = 0.015 + (0.06 + b.x * 0.25) * pos * pos * (0.5 + uBass + uBeat * 0.4);",
+    "    float rs = pos * pos * 1.9, len = 0.015 + (0.06 + b.x * 0.25) * pos * pos * (0.5 + uBass + uBeat * 1.4);",
     "    float da = abs(fract(ca) - 0.5) / cells * TAU * r, w = 0.003 + 0.005 * pos + uPx;",
     "    float trail = smoothstep(len, 0.0, rs - r) * step(r, rs);",
-    "    col += pal(h + fl * 0.2 + b.y, c, d) * smoothstep(w, 0.0, da) * trail * pos * 2.2 * smoothstep(1.0, 0.85, pos);",
+    "    col += pal(h + fl * 0.2 + b.y, c, d) * smoothstep(w, 0.0, da) * trail * pos * (2.2 + 1.6 * uBeat) * smoothstep(1.0, 0.85, pos);",
     "  }",
     "  col += pal(0.5 + b.z, c, d) * exp(-r * 3.5) * (0.15 + uGlow * 0.4);",
     "  col += pal(0.8, c, d) * smoothstep(0.6, 1.8, r) * fbm(p * 1.5 + t * 0.05) * 0.15 * b.w;",
@@ -2570,10 +2572,10 @@
     "  ang = mod(ang, 2.0 * seg); ang = abs(ang - seg);",
     "  vec2 qq = vec2(cos(ang), sin(ang)) * r * (1.2 + a.z * 2.0) + vec2(t * 0.12, t * 0.07);",
     "  vec2 w = vec2(fbm(qq + t * 0.05), fbm(qq + vec2(5.2, 1.3) - t * 0.045));",
-    "  float f = fbm(qq + (1.5 + b.x * 2.0) * w + uBass * 0.3);",
+    "  float f = fbm(qq + (1.5 + b.x * 2.0 + uBeat * 0.12) * w + uBass * 0.3);",
     "  float fe = f * (3.0 + b.y * 5.0), e = smoothstep(0.06 + fw(fe), 0.0, abs(fract(fe) - 0.5) - 0.4) * lod(fe);",
     "  vec3 col = pal(f * 1.4 + r * b.z + a.w, c, d) * (0.2 + f * f * 1.6);",
-    "  col += e * pal(f + 0.33, c, d) * (0.3 + uTreb * 0.6 + uGlow);",
+    "  col += e * pal(f + 0.33, c, d) * (0.3 + uTreb * 0.6 + uGlow + uBeat * 0.8);",
     "  return col * (1.0 + uGlow * 0.3); }",
   ].join("\n"),
     [
@@ -2582,17 +2584,17 @@
     // Zoomed in with 9 iterations: at 12 and full view its detail was finer
     // than a pixel and read as noise.
     "  p = rot(t * (k.x - 0.5) * 0.12) * p; p *= 0.35 + a.y * 0.35;",
-    "  vec2 kk = vec2(0.55 + a.z * 0.15, 0.45 + a.w * 0.15) + 0.02 * vec2(sin(t * 0.21), cos(t * 0.17));",
+    "  vec2 kk = vec2(0.55 + a.z * 0.15, 0.45 + a.w * 0.15) + 0.02 * vec2(sin(t * 0.21), cos(t * 0.17)) + vec2(0.035, -0.025) * uBeat;",
     "  vec2 z = abs(p) + 0.001; float acc = 0.0, tr = 10.0;",
     "  for (int i = 0; i < 9; i++){ z = abs(z) / (dot(z, z) + 0.0004) - kk; acc += exp(-length(z) * (1.5 + b.x * 2.0)); tr = min(tr, abs(z.y)); }",
     "  vec3 col = pal(acc * 0.12 + b.y + tr, c, d) * clamp(acc * 0.25, 0.0, 1.5);",
-    "  col += pal(acc * 0.1 + 0.5, c, d) * smoothstep(0.03 + fw(tr) * 1.5, 0.0, tr) * lod(tr * 20.0) * (0.3 + uTreb * 0.5 + uGlow);",
+    "  col += pal(acc * 0.1 + 0.5, c, d) * smoothstep(0.03 + fw(tr) * 1.5, 0.0, tr) * lod(tr * 20.0) * (0.3 + uTreb * 0.5 + uGlow + uBeat * 1.4);",
     "  return col; }",
   ].join("\n"),
     [
     // 4 julia
     "vec3 sJulia(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
-    "  float dir = k.x > 0.5 ? 1.0 : -1.0, th = t * 0.04 * dir + k.y * TAU + a.y * 0.6;",
+    "  float dir = k.x > 0.5 ? 1.0 : -1.0, th = t * 0.04 * dir + k.y * TAU + a.y * 0.6 + uBeat * 0.07;",
     "  vec2 kk = 0.7885 * vec2(cos(th), sin(th));",
     "  if (k.z > 0.6) p = abs(p) - vec2(0.3 + b.z * 0.3);",
     "  float sc = 1.0 + a.z * 0.6;",
@@ -2612,20 +2614,21 @@
     "  float v = (it - log2(max(log2(m2), 0.0001)) + 4.0) / 64.0;",
     "  float onSet = smoothstep(0.0, 2.5, dist), halo = exp(-dist / 7.0);",
     "  vec3 outside = pal(v * 1.5 + b.x, c, d) * smoothstep(0.0, 0.35, v) * 0.9;",
-    "  return (outside + pal(b.x + 0.25, c, d) * halo * (1.1 + uGlow)) * onSet + pal(b.x + 0.5, c, d) * 0.04 * (1.0 - onSet); }",
+    "  return (outside + pal(b.x + 0.25, c, d) * halo * (1.1 + uGlow + uBeat * 1.3)) * onSet + pal(b.x + 0.5, c, d) * 0.04 * (1.0 - onSet); }",
   ].join("\n"),
     [
     // 5 spiral
     "vec3 sSpiral(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float r = length(p), ang = atan(p.y, p.x), lr = log(r + 0.001);",
     "  float arms = floor(1.0 + k.x * 6.0), dir = k.z > 0.5 ? 1.0 : -1.0, tight = 1.5 + q.y * 5.0 + a.y * 0.6;",
-    "  float s = ang * arms / TAU + lr * tight * dir - t * (0.3 + k.w * 0.8);",
+    "  float s = ang * arms / TAU + lr * tight * dir - t * (0.3 + k.w * 0.8) - uBeat * 0.1;",
     "  float pw = uPx / max(r, 0.001), ws = pw * (arms / TAU + tight);",
     "  float v = mix(0.35, pow(0.5 + 0.5 * sin(s * TAU), 1.0 + b.x * 4.0), lodw(ws));",
     "  float s2 = ang * floor(1.0 + q.x * 4.0) / TAU - lr * tight * 0.7 * dir + t * 0.2;",
     "  float m = mix(v, v * (1.0 + sin(s2 * TAU) * lodw(pw * (floor(1.0 + q.x * 4.0) / TAU + tight * 0.7))), b.z);",
     "  vec3 col = pal(lr * 0.25 - t * 0.015 + 0.1 * sin(ang * arms) + b.w, c, d) * m;",
-    "  col += pal(0.6 + b.w, c, d) * exp(-r * 5.0) * (0.3 + uBass * 0.6 + uGlow);",
+    "  col += pal(0.6 + b.w, c, d) * exp(-r * 5.0) * (0.3 + uBass * 0.6 + uGlow + uBeat * 1.2);",
+    "  col *= 1.0 + 0.35 * uBeat;",
     "  return col; }",
   ].join("\n"),
     [
@@ -2634,9 +2637,9 @@
     "  p *= 0.8 + a.x * 1.6;",
     "  vec2 qq = vec2(fbm(p + t * 0.06), fbm(p + vec2(5.2, 1.3)));",
     "  vec2 r = vec2(fbm(p + 4.0 * qq + vec2(1.7, 9.2) + t * 0.12), fbm(p + 4.0 * qq + vec2(8.3, 2.8) - t * 0.1));",
-    "  float f = fbm(p + (2.5 + a.y * 3.0 + uBass * 1.2) * r);",
+    "  float f = fbm(p + (2.5 + a.y * 3.0 + uBass * 1.2 + uBeat * 0.4) * r);",
     "  vec3 col = pal(f * 1.2 + length(qq) * 0.6 + b.x, c, d);",
-    "  return col * (0.2 + f * f * 1.8 + uGlow * 0.25); }",
+    "  return col * (0.2 + f * f * (1.8 + uBeat * 1.2) + uGlow * 0.25); }",
   ].join("\n"),
     [
     // 7 spectrum rings
@@ -2646,12 +2649,12 @@
     "  float sym = floor(1.0 + k.y * 3.0), x = fract(ang * sym); x = abs(x * 2.0 - 1.0);",
     "  float nb = 2.0 * sym * floor(6.0 + q.x * 14.0), cell = fract(ang * nb), xq = (floor(x * nb / sym * 0.5) + 0.5) / (nb / sym * 0.5);",
     "  float bars = q.y > 0.5 ? 1.0 : 0.0, v = band(mix(x, clamp(xq, 0.0, 1.0), bars));",
-    "  float r0 = 0.22 + a.z * 0.12, top = r0 + v * (0.3 + a.w * 0.3);",
+    "  float r0 = 0.22 + a.z * 0.12 + 0.05 * uBeat, top = r0 + v * (0.3 + a.w * 0.3);",
     "  float gap = mix(1.0, smoothstep(0.0, 0.1, cell) * smoothstep(1.0, 0.9, cell), bars);",
     "  float fr = (r - r0) * 36.0, seg = q.z > 0.5 ? mix(0.75, smoothstep(0.25 - fw(fr), 0.3 + fw(fr), fract(fr)), lod(fr)) : 1.0;",
     "  float inBar = smoothstep(r0 - 0.004, r0, r) * smoothstep(top + 0.004, top, r) * gap * seg;",
     "  vec3 col = pal(x * 0.5 + r * 0.8 + b.w, c, d) * inBar * 1.4;",
-    "  col += pal(b.w + 0.1, c, d) * smoothstep(0.012, 0.0, abs(r - r0 * 0.85)) * (0.4 + uGlow * 1.2);",
+    "  col += pal(b.w + 0.1, c, d) * smoothstep(0.012 + 0.01 * uBeat, 0.0, abs(r - r0 * 0.85)) * (0.4 + uGlow * 1.2 + uBeat * 1.8);",
     "  col += pal(b.w + 0.4, c, d) * exp(-r * 7.0) * uBass * 0.6;",
     "  float e = fract(r * 1.8 - t * 0.4);",
     "  col += pal(r + b.w, c, d) * smoothstep(0.03, 0.0, abs(e - 0.5)) * 0.12 * (1.0 + uLevel * 1.5);",
@@ -2670,7 +2673,7 @@
     "      vec2 dir = vec2(cos(an), sin(an)), rel = p - o;",
     "      float along = dot(rel, dir), dist = abs(rel.x * dir.y - rel.y * dir.x);",
     "      float on = smoothstep(-0.05, 0.05, along), lv = band(fi / nbeam);",
-    "      col += pal(fi * 0.11 + b.z, c, d) * (smoothstep(0.01 + 0.006 * uBeat, 0.0, dist) * 1.4 + exp(-dist * 30.0) * 0.35) * on * (0.4 + lv * 1.1 + uGlow * 0.5);",
+    "      col += pal(fi * 0.11 + b.z, c, d) * (smoothstep(0.01 + 0.014 * uBeat, 0.0, dist) * 1.4 + exp(-dist * 30.0) * 0.35) * on * (0.4 + lv * 1.1 + uGlow * 0.5 + uBeat * 0.9);",
     "    }",
     "  }",
     "  col += pal(0.7 + b.z, c, d) * fbm(p * 2.0 + vec2(t * 0.1, 0.0)) * (0.08 + a.w * 0.12);",
@@ -2681,7 +2684,7 @@
     "vec3 sGrid(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float hz = -0.08 + (a.x - 0.5) * 0.15; vec3 col = vec3(0.0);",
     "  col += pal(0.6 + b.x + p.y * 0.2, c, d) * smoothstep(-0.3, 1.2, p.y - hz) * 0.25;",
-    "  vec2 sp = p - vec2((a.y - 0.5) * 0.8, hz + 0.32); float sr = 0.3 + uBass * 0.03;",
+    "  vec2 sp = p - vec2((a.y - 0.5) * 0.8, hz + 0.32); float sr = 0.3 + uBass * 0.03 + uBeat * 0.045;",
     "  float slats = sp.y < 0.0 ? smoothstep(0.42, 0.48, fract(sp.y * 16.0 - t * 0.4)) : 1.0;",
     "  col += pal(b.x + 0.05 - sp.y * 0.6, c, d) * smoothstep(sr, sr - 0.01, length(sp)) * slats * 1.3;",
     "  float ax = abs(p.x) / (uAspect * 1.05), sky = band(ax) * (0.25 + a.z * 0.3);",
@@ -2689,14 +2692,14 @@
     "  float dy = max(hz - p.y, 0.001), z = 0.35 / dy, x = p.x * z;",
     "  float zz = z * 0.5 + t * (0.5 + k.x * 1.2), xx = x * 0.5, gz = abs(fract(zz) - 0.5), gx = abs(fract(xx) - 0.5);",
     "  float ln = max(smoothstep(0.02 * z + fw(xx), 0.0, gx) * lod(xx), smoothstep(0.03 * z + fw(zz), 0.0, gz) * lod(zz));",
-    "  vec3 floorCol = pal(b.x + 0.9, c, d) * 0.06 + pal(b.x + 0.85 + z * 0.02, c, d) * ln * exp(-z * 0.12) * (1.0 + uGlow * 1.2);",
+    "  vec3 floorCol = pal(b.x + 0.9, c, d) * 0.06 + pal(b.x + 0.85 + z * 0.02, c, d) * ln * exp(-z * 0.12) * (1.0 + uGlow * 1.2 + uBeat * 1.5);",
     "  return mix(col, floorCol, smoothstep(hz + 0.004, hz - 0.004, p.y)); }",
   ].join("\n"),
     [
     // 10 oscilloscope: a Lissajous figure turning slowly, wobbled by the bands, over a graticule
     "vec3 sScope(vec2 p, vec4 a, vec4 b, vec4 k, vec4 q, float t, vec3 c, vec3 d){",
     "  float fa = 1.0 + floor(k.x * 4.0), fb = fa + 1.0 + floor(k.y * 2.0), ph = t * (0.12 + k.z * 0.2);",
-    "  float A = (0.5 + 0.12 * a.x + 0.06 * uBass) * min(uAspect, 1.6), B = 0.62 + 0.1 * a.y + 0.05 * uBass;",
+    "  float A = (0.5 + 0.12 * a.x + 0.06 * uBass + 0.07 * uBeat) * min(uAspect, 1.6), B = 0.62 + 0.1 * a.y + 0.05 * uBass + 0.07 * uBeat;",
     "  float dm = 10.0; vec2 pr = vec2(0.0);",
     "  for (int i = 0; i <= 120; i++){",
     "    float u = float(i) / 120.0, sv = u * TAU;",
@@ -2708,7 +2711,7 @@
     "  float line = smoothstep(0.003 + uPx * 1.5, 0.0, dm), glow = exp(-dm / (0.015 + 0.03 * b.x));",
     "  vec2 g = abs(fract(p * 2.5 + 0.5) - 0.5) / 2.5, ax = abs(p);",
     "  float grat = smoothstep(uPx * 1.2, 0.0, min(g.x, g.y)) * 0.07 + smoothstep(uPx * 1.2, 0.0, min(ax.x, ax.y)) * 0.06;",
-    "  return pal(b.y, c, d) * (line * 1.5 + glow * 0.45) + vec3(grat); }",
+    "  return pal(b.y, c, d) * (line * (1.5 + uBeat) + glow * (0.45 + uBeat * 0.6)) + vec3(grat); }",
   ].join("\n"),
     [
     // 11 digital rain: columns of square cells, a bright head falling and a fading trail
@@ -2720,7 +2723,7 @@
     "  float trail = dy > 0.0 ? exp(-dy * (3.0 + 5.0 * a.x)) : 0.0, hd = smoothstep(cw, 0.0, abs(dy));",
     "  float on = step(0.22, hash(cell + vec2(floor(k.w * 50.0), 3.0))), lv = band(cell.x / cols);",
     "  float sq = smoothstep(0.5, 0.4, max(abs(f.x), abs(f.y))) * smoothstep(1.55, 1.2, head);",
-    "  return pal(b.y + cell.x / cols * 0.2, c, d) * (trail * on * (0.45 + lv) + hd * 1.3) * sq; }",
+    "  return pal(b.y + cell.x / cols * 0.2, c, d) * (trail * on * (0.45 + lv + uBeat * 0.6) + hd * (1.3 + uBeat * 1.2)) * sq; }",
   ].join("\n"),
     [
     // 12 LED equaliser: straight bars of lit segments, the top segment lit in proportion (no flicker)
@@ -2731,7 +2734,7 @@
     "  float segs = 22.0, sy = yb * segs, lit = clamp(v * segs - floor(sy), 0.0, 1.0);",
     "  float cellm = smoothstep(0.0, 0.14, fract(sy)) * smoothstep(1.0, 0.86, fract(sy)) * smoothstep(0.06, 0.14, fx) * smoothstep(0.94, 0.86, fx);",
     "  vec3 tone = pal(b.y + yb * 0.45 + bi / nb * 0.15, c, d);",
-    "  return tone * cellm * (lit * 1.35 + 0.05); }",
+    "  return tone * cellm * (lit * (1.35 + uBeat * 0.8) + 0.05); }",
   ].join("\n"),
   ];
   var LS_SCENE_FN = ["sTunnel", "sWarp", "sKaleido", "sFractal", "sJulia", "sSpiral", "sLiquid", "sRings", "sLasers", "sGrid", "sScope", "sMatrix", "sEq"];
@@ -3841,6 +3844,23 @@
     for (var i = 0; i < 16; i++) hz.push(40 * Math.pow(250, i / 15));
     return hz;
   };
+  // Tap to sync (owner, 2026-11-21): the position on screen this instant and
+  // the track's beat grid, so the app can compare a tap on the beat the
+  // listener hears with the beat the picture shows. Every style draws its
+  // beat ~50-60 ms ahead of S.pos for the frame and compositor, so S.pos is
+  // what is on screen. Null until a spectrum is set; `beats` is empty when
+  // the track has no steady beat. `onsets` is the track's onset strength (one
+  // value per spectrum bucket from `onsetStart`): what the taps are matched
+  // against, because the grid can sit at 3/2 of the real tempo (owner,
+  // 2026-11-22, Guts "Shabi-Bi-Di-Do": grid 149 bpm, taps ~100, "uneven").
+  P.beatSync = function () {
+    var sp = this.spec, S = this.S;
+    if (!sp) return null;
+    if (this.bsFor !== sp) { this.bsFor = sp; this.bsAn = lsAnalyse(sp, this.specTop); }
+    var A = this.bsAn, pos = S.pos + (S.playing && this.posT ? Math.max(0, now() - this.posT) / 1000 : 0);
+    if (this.view === "lightshow" && this.ls && this.ls.opts) pos -= this.ls.opts.delay || 0;
+    return { pos: pos, playing: !!S.playing, beats: A && A.steady ? A.beats : [], onsets: A ? A.on : null, onsetStart: A ? A.start : 0, bucketSeconds: sp.bucketSeconds };
+  };
   P.setPosition = function (seconds, playing, duration) {
     var d = num(duration, 0);
     this.S.dur = d > 0 ? d : 0;
@@ -3970,6 +3990,7 @@
     if (S.dur > 0) S.pos = Math.min(S.pos, S.dur);
     S.pos = Math.max(0, S.pos);
     S.playing = A.playing;
+    this.posT = t;
     S.progress = S.dur > 0 ? clamp(S.pos / S.dur, 0, 1) : 0;
     var dpos = jumped ? 0 : S.pos - prev;
     return Math.abs(dpos) > 60 ? 0 : dpos;
