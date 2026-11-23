@@ -2071,6 +2071,10 @@
   // How far ahead of the play position the beat is drawn: one frame plus the
   // compositor, so the pulse lands when the sound does.
   var LS_LEAD = 0.05;
+  // How hard the scenes' shapes answer the beat (uBeat). Full strength flared
+  // too much every beat (owner, 2026-11-22: "no need for quite so much
+  // flashing make it a bit subtler"); the forward surge is unchanged.
+  var LS_BEAT_SHAPES = 0.55;
 
   // The track's tempo, a steady beat grid, and drops — from its spectrum.
   function lsAnalyse(sp, top) {
@@ -2956,7 +2960,7 @@
     gl.uniform1i(u.uSpec, 1);
     gl.uniform1f(u.uAspect, w / h); gl.uniform1f(u.uPx, 2 / h);
     gl.uniform1f(u.uBass, L.bass); gl.uniform1f(u.uMid, L.mid); gl.uniform1f(u.uTreb, L.treb);
-    gl.uniform1f(u.uBeat, L.beat); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level);
+    gl.uniform1f(u.uBeat, L.beat * LS_BEAT_SHAPES); gl.uniform1f(u.uGlow, L.glow); gl.uniform1f(u.uLevel, L.level);
     gl.uniform1f(u.uPunch, L.punch);
     gl.uniform1f(u.uDirect, slot < 0 ? 1 : 0);
     gl.uniform1f(u.uT, sc.time % 2000);
